@@ -1,36 +1,51 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Referencer
 
-## Getting Started
+Match an unmastered client track to commercially released references in a similar sonic ballpark — a fast A/B starting point for mastering engineers.
 
-First, run the development server:
+## Stack
+
+- Next.js (App Router) + TypeScript + Tailwind v4
+- shadcn/ui + Motion
+- Clerk (auth)
+- Neon Postgres (metadata + feature cache)
+- Cloudflare R2 (optional client-audio storage)
+- iTunes Search / RSS (commercial reference discovery)
+- Essentia.js (WASM) for loudness, frequency balance, tempo, stereo width
+
+## Setup
 
 ```bash
+cp .env.example .env.local
+# Fill Clerk keys (or run: clerk init --app <your-app-id>)
+# DATABASE_URL is already needed for Neon
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Optional: Cloudflare R2
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Without R2, analysis and matching still work — A/B playback uses a local blob URL for the uploaded file. To persist client audio:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Create an R2 bucket at [dash.cloudflare.com](https://dash.cloudflare.com) → R2
+2. Create an API token with Object Read/Write
+3. Set `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` in `.env.local`
 
-## Learn More
+## Flow
 
-To learn more about Next.js, take a look at the following resources:
+1. Sign in → upload a client track → pick an Apple Music genre
+2. Browser analyzes the file (Essentia.js worker): LUFS, LRA, 7-band balance, BPM, stereo width
+3. `/api/match` loads genre-filtered references from Neon; if the cache is thin, it pulls iTunes top songs / search, analyzes 30s previews server-side, and caches them
+4. Results show ranked matches with plain-English reasons, band meters, and A/B playback
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Design tokens
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+All colors live in `src/app/globals.css` (`@theme`). Use named utilities only:
 
-## Deploy on Vercel
+| Token | Meaning |
+| --- | --- |
+| `surface-0/1/2` | Page / card / raised |
+| `text-primary/secondary/muted` | Text hierarchy |
+| `client` | Your track / primary actions (meter cyan) |
+| `reference` | Reference track data (amber) |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Numeric readouts use `font-mono` (tabular figures).

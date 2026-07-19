@@ -1,26 +1,220 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@clerk/ui/themes/shadcn.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Design system — dark studio
+  Single source of truth. Feature code uses named tokens only
+  (bg-surface-0, text-text-primary, bg-client, text-reference, …).
+  No raw hex / arbitrary values in components.
+*/
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Surfaces — 3-step elevation ladder (lighter = raised) */
+  --surface-0: oklch(0.13 0.012 250);
+  --surface-1: oklch(0.2 0.012 250);
+  --surface-2: oklch(0.26 0.014 250);
+
+  /* Text — three steps only */
+  --text-primary: oklch(0.95 0.005 250);
+  --text-secondary: oklch(0.72 0.01 250);
+  --text-muted: oklch(0.55 0.01 250);
+
+  /* Client track / meter glow (accent) */
+  --client: oklch(0.82 0.15 175);
+  --client-muted: oklch(0.82 0.15 175 / 0.16);
+  --client-foreground: oklch(0.16 0.02 175);
+
+  /* Reference track — warm amber, comparison color only */
+  --reference: oklch(0.8 0.14 70);
+  --reference-muted: oklch(0.8 0.14 70 / 0.16);
+
+  --destructive: oklch(0.65 0.2 25);
+  --border: oklch(1 0 0 / 10%);
+
+  /* Radii — only two intentional sizes (sm + lg); md bridges shadcn */
+  --radius: 0.5rem;
+
+  /* shadcn semantic aliases → our tokens */
+  --background: var(--surface-0);
+  --foreground: var(--text-primary);
+  --card: var(--surface-1);
+  --card-foreground: var(--text-primary);
+  --popover: var(--surface-2);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--client);
+  --primary-foreground: var(--client-foreground);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--text-primary);
+  --muted: var(--surface-2);
+  --muted-foreground: var(--text-muted);
+  --accent: var(--surface-2);
+  --accent-foreground: var(--text-primary);
+  --input: oklch(1 0 0 / 12%);
+  --ring: var(--client);
+
+  --chart-1: var(--client);
+  --chart-2: var(--reference);
+  --chart-3: oklch(0.7 0.08 250);
+  --chart-4: oklch(0.55 0.06 250);
+  --chart-5: oklch(0.4 0.04 250);
+
+  --sidebar: var(--surface-1);
+  --sidebar-foreground: var(--text-primary);
+  --sidebar-primary: var(--client);
+  --sidebar-primary-foreground: var(--client-foreground);
+  --sidebar-accent: var(--surface-2);
+  --sidebar-accent-foreground: var(--text-primary);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--client);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-geist-sans);
+
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-client: var(--client);
+  --color-client-muted: var(--client-muted);
+  --color-client-foreground: var(--client-foreground);
+  --color-reference: var(--reference);
+  --color-reference-muted: var(--reference-muted);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Only two intentional radii; md exists for shadcn internals */
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/*
+  Gloss utilities — Cobalt-style lighting, recolored to our teal accent.
+  Kept here so components never need arbitrary values.
+*/
+
+/* Soft radial accent glow, meant for a thin full-width layer at the top of a section */
+@utility hero-glow {
+  background: radial-gradient(
+    80% 100% at 50% -10%,
+    color-mix(in oklch, var(--client), transparent 72%),
+    transparent 72%
+  );
+}
+
+/* Faint square grid that fades out toward the bottom */
+@utility grid-texture {
+  background-image:
+    linear-gradient(to right, oklch(1 0 0 / 5%) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(1 0 0 / 5%) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(to bottom, black 30%, transparent);
+}
+
+/* Glossy card: top-edge shine line + faint top-down sheen + accent bloom */
+@utility card-glossy {
+  position: relative;
+  background-image: linear-gradient(to bottom, oklch(1 0 0 / 6%), transparent 45%);
+  box-shadow: 0 0 64px -12px color-mix(in oklch, var(--client), transparent 75%);
+
+  &::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 8%;
+    right: 8%;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklch, var(--client), transparent 25%),
+      transparent
+    );
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Headline gradient: bright at top, dimming toward the baseline */
+/* background-image (not the shorthand) so the minifier can't fold the clip away */
+@utility text-hero-gradient {
+  background-image: linear-gradient(
+    to bottom,
+    oklch(0.99 0 0),
+    var(--text-secondary)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* Accent bloom for primary actions */
+@utility glow-client {
+  box-shadow: 0 0 24px -8px color-mix(in oklch, var(--client), transparent 40%);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply font-sans;
+    color-scheme: dark;
+  }
+
+  body {
+    @apply min-h-full bg-surface-0 text-text-primary antialiased;
+  }
+
+  /* Tabular figures for metering readouts (LUFS, BPM, dB) */
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
 }

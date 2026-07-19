@@ -1,0 +1,197 @@
+"use client";
+
+import { useEffect } from "react";
+import { XIcon } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import { createPortal } from "react-dom";
+
+import { MatchCard, type MatchResult } from "@/components/match-card";
+import { MatchCarousel } from "@/components/match-carousel";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  WEIGHT_PRESET_LABELS,
+  type WeightPreset,
+} from "@/lib/matching";
+import { easeOutSoft } from "@/lib/motion";
+import type { FeatureVector } from "@/lib/types";
+
+interface ReferencesLightboxProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  matches: MatchResult[];
+  activeIndex: number;
+  onActiveIndexChange: (index: number) => void;
+  clientFeatures: FeatureVector;
+  clientPlaybackUrl: string | null;
+  weightPreset: WeightPreset;
+  onWeightPresetChange: (preset: WeightPreset) => void;
+  discoveryNote: string | null;
+}
+
+export function ReferencesLightbox({
+  open,
+  onOpenChange,
+  matches,
+  activeIndex,
+  onActiveIndexChange,
+  clientFeatures,
+  clientPlaybackUrl,
+  weightPreset,
+  onWeightPresetChange,
+  discoveryNote,
+}: ReferencesLightboxProps) {
+  useEffect(() => {
+    if (!open) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onOpenChange(false);
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onOpenChange]);
+
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          key="references-lightbox"
+          className="fixed inset-0 z-50 flex items-stretch justify-center p-3 sm:p-5 md:p-8"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="references-lightbox-title"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.28, ease: easeOutSoft }}
+        >
+          <motion.button
+            type="button"
+            aria-label="Close references"
+            className="absolute inset-0 bg-surface-0/80 backdrop-blur-md"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.28, ease: easeOutSoft }}
+            onClick={() => onOpenChange(false)}
+          />
+
+          <motion.div
+            className="relative z-10 flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-surface-1 ring-1 ring-border"
+            initial={{ opacity: 0, scale: 0.94, y: 28 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 16 }}
+            transition={{
+              type: "spring",
+              stiffness: 320,
+              damping: 28,
+              mass: 0.85,
+            }}
+          >
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 top-0 h-48"
+            >
+              <div className="hero-glow absolute inset-0 opacity-60" />
+            </div>
+
+            <header className="relative flex shrink-0 items-start justify-between gap-4 border-b border-border px-5 py-4 sm:px-8 sm:py-5">
+              <div className="flex min-w-0 flex-col gap-1">
+                <h2
+                  id="references-lightbox-title"
+                  className="text-xl font-semibold tracking-tight text-text-primary sm:text-2xl"
+                >
+                  Reference matches
+                </h2>
+                {discoveryNote && (
+                  <p className="max-w-2xl text-sm text-text-muted">
+                    {discoveryNote}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex shrink-0 items-center gap-2">
+                <Select
+                  value={weightPreset}
+                  onValueChange={(value) => {
+                    if (
+                      value === "balanced" ||
+                      value === "tone" ||
+                      value === "loudness"
+                    ) {
+                      onWeightPresetChange(value);
+                    }
+                  }}
+                >
+                  <SelectTrigger className="w-40 sm:w-44">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(WEIGHT_PRESET_LABELS) as WeightPreset[]).map(
+                      (key) => (
+                        <SelectItem key={key} value={key}>
+                          {WEIGHT_PRESET_LABELS[key]}
+                        </SelectItem>
+                      ),
+                    )}
+                  </SelectContent>
+                </Select>
+
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => onOpenChange(false)}
+                  aria-label="Close"
+                  className="bg-surface-0/50"
+                >
+                  <XIcon className="size-5" />
+                </Button>
+              </div>
+            </header>
+
+            <div className="relative flex-1 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8">
+              {matches.length === 0 ? (
+                <p className="text-sm text-text-secondary">
+                  No matches this run — similarity results vary, so try
+                  analyzing again.
+                </p>
+              ) : (
+                <div className="mx-auto flex max-w-4xl flex-col gap-8">
+                  <MatchCarousel
+                    matches={matches}
+                    activeIndex={activeIndex}
+                    onActiveIndexChange={onActiveIndexChange}
+                  />
+                  {matches[activeIndex] && (
+                    <MatchCard
+                      match={matches[activeIndex]}
+                      clientFeatures={clientFeatures}
+                      clientPlaybackUrl={clientPlaybackUrl}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>,
+    document.body,
+  );
+}
