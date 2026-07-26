@@ -45,11 +45,15 @@ export function SessionResults({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const response = await fetch(`/api/uploads/${uploadId}/audio`);
-      if (!response.ok || cancelled) return;
-      const data = (await response.json()) as { playbackUrl?: string };
-      if (!cancelled && data.playbackUrl) {
-        setClientPlaybackUrl(data.playbackUrl);
+      try {
+        const response = await fetch(`/api/uploads/${uploadId}/audio`);
+        if (!response.ok || cancelled) return;
+        const data = (await response.json()) as { playbackUrl?: string };
+        if (!cancelled && data.playbackUrl) {
+          setClientPlaybackUrl(data.playbackUrl);
+        }
+      } catch {
+        // Network / abort — leave client A/B unavailable.
       }
     })();
     return () => {

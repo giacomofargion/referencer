@@ -42,6 +42,11 @@ type Phase =
 export function UploadCard() {
   const [file, setFile] = useState<File | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
+  // Keeps the picker label correct when a project is assigned via the save dialog.
+  const [knownProject, setKnownProject] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [weightPreset, setWeightPreset] = useState<WeightPreset>("balanced");
   const [phase, setPhase] = useState<Phase>({ step: "idle" });
   const [activeIndex, setActiveIndex] = useState(0);
@@ -252,22 +257,51 @@ export function UploadCard() {
 
             <ProjectPicker
               value={phase.step === "done" ? phase.projectId : projectId}
+              knownOption={knownProject}
               onChange={(next) => {
-                setProjectId(next);
-                if (phase.step === "done") {
-                  const uploadId = phase.uploadId;
-                  setPhase({ ...phase, projectId: next });
-                  // Keep Neon in sync if the engineer reassigns after matching.
-                  void fetch(`/api/sessions/${uploadId}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ projectId: next }),
-                  }).then(async (response) => {
-                    if (!response.ok) {
-                      toast.error("Could not update project for this session");
-                    }
-                  });
+                if (phase.step !== "done") {
+                  setProjectId(next);
+                  if (next === null || knownProject?.id !== next) {
+                    setKnownProject(null);
+                  }
+                  return;
                 }
+
+                const uploadId = phase.uploadId;
+                const previousProjectId = phase.projectId;
+                const previousKnown = knownProject;
+
+                setProjectId(next);
+                if (next === null || knownProject?.id !== next) {
+                  setKnownProject(null);
+                }
+                // Functional update so concurrent match toggles aren't clobbered.
+                setPhase((current) =>
+                  current.step === "done"
+                    ? { ...current, projectId: next }
+                    : current,
+                );
+
+                void fetch(`/api/sessions/${uploadId}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ projectId: next }),
+                })
+                  .then((response) => {
+                    if (!response.ok) {
+                      throw new Error("Project assignment rejected");
+                    }
+                  })
+                  .catch(() => {
+                    setProjectId(previousProjectId);
+                    setKnownProject(previousKnown);
+                    setPhase((current) =>
+                      current.step === "done"
+                        ? { ...current, projectId: previousProjectId }
+                        : current,
+                    );
+                    toast.error("Could not update project for this session");
+                  });
               }}
               disabled={busy}
             />
@@ -356,6 +390,7 @@ export function UploadCard() {
                 projectId={phase.projectId}
                 onProjectAssigned={(project) => {
                   setProjectId(project.id);
+                  setKnownProject(project);
                   setPhase((current) =>
                     current.step === "done"
                       ? { ...current, projectId: project.id }

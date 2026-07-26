@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -22,29 +22,41 @@ interface ProjectPickerProps {
   value: string | null;
   onChange: (projectId: string | null) => void;
   disabled?: boolean;
+  /**
+   * When a project was assigned outside this picker (e.g. save dialog),
+   * pass it so the label/options stay correct before a refetch lands.
+   */
+  knownOption?: ProjectOption | null;
 }
 
 const NONE_VALUE = "__none__";
+
+async function fetchProjects(): Promise<ProjectOption[]> {
+  const response = await fetch("/api/projects");
+  if (!response.ok) return [];
+  const data = (await response.json()) as { projects: ProjectOption[] };
+  return data.projects;
+}
 
 /** Optional project assignment before analyzing a client track. */
 export function ProjectPicker({
   value,
   onChange,
   disabled,
+  knownOption = null,
 }: ProjectPickerProps) {
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [busy, setBusy] = useState(false);
+  const projectFieldId = useId();
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch("/api/projects");
-        if (!response.ok) return;
-        const data = (await response.json()) as { projects: ProjectOption[] };
-        if (!cancelled) setProjects(data.projects);
+        const next = await fetchProjects();
+        if (!cancelled) setProjects(next);
       } catch {
         // Picker is optional — ignore load failures.
       }
@@ -53,6 +65,34 @@ export function ProjectPicker({
       cancelled = true;
     };
   }, []);
+
+  // One-time mount list can miss projects assigned via the save dialog.
+  useEffect(() => {
+    if (value === null) return;
+    if (projects.some((project) => project.id === value)) return;
+    if (knownOption?.id === value) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const next = await fetchProjects();
+        if (!cancelled) setProjects(next);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [value, projects, knownOption]);
+
+  const options = useMemo(() => {
+    if (!knownOption) return projects;
+    if (projects.some((project) => project.id === knownOption.id)) {
+      return projects;
+    }
+    return [knownOption, ...projects];
+  }, [projects, knownOption]);
 
   async function handleCreate() {
     const name = newName.trim();
@@ -88,16 +128,19 @@ export function ProjectPicker({
   const selectedLabel =
     value === null
       ? "No project"
-      : (projects.find((project) => project.id === value)?.name ?? "No project");
+      : (options.find((project) => project.id === value)?.name ??
+        (knownOption?.id === value ? knownOption.name : null) ??
+        "No project");
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="text-xs text-text-muted">
+      <label htmlFor={projectFieldId} className="text-xs text-text-muted">
         Project <span className="text-text-muted/70">(optional)</span>
       </label>
       {creating ? (
         <div className="flex flex-wrap gap-2">
           <Input
+            id={projectFieldId}
             value={newName}
             onChange={(event) => setNewName(event.target.value)}
             placeholder="Project name"
@@ -136,7 +179,7 @@ export function ProjectPicker({
             }}
             disabled={disabled}
           >
-            <SelectTrigger className="w-56">
+            <SelectTrigger id={projectFieldId} className="w-56">
               {/* Base UI falls back to the raw value (UUID) without an explicit label. */}
               <SelectValue placeholder="No project">
                 {selectedLabel}
@@ -144,7 +187,7 @@ export function ProjectPicker({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={NONE_VALUE}>No project</SelectItem>
-              {projects.map((project) => (
+              {options.map((project) => (
                 <SelectItem key={project.id} value={project.id}>
                   {project.name}
                 </SelectItem>

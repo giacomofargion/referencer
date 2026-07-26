@@ -10,6 +10,7 @@ export function isFeatureVector(value: unknown): value is FeatureVector {
     typeof v.tempoBpm === "number" &&
     typeof v.stereoWidth === "number" &&
     Array.isArray(v.frequencyBandEnergies) &&
-    v.frequencyBandEnergies.length === 7
+    v.frequencyBandEnergies.length === 7 &&
+    v.frequencyBandEnergies.every((n) => typeof n === "number")
   );
 }

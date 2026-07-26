@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { sql } from "@/lib/db";
 import { isFeatureVector } from "@/lib/feature-vector";
+import { isUuid } from "@/lib/ids";
 import type { FeatureVector } from "@/lib/types";
 
 type RouteContext = { params: Promise<{ uploadId: string }> };
@@ -122,7 +123,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   let projectId: string | null = null;
   if (body.projectId !== undefined && body.projectId !== null) {
     const trimmed = String(body.projectId).trim();
-    if (!trimmed) {
+    if (!trimmed || !isUuid(trimmed)) {
       return NextResponse.json({ error: "Invalid projectId" }, { status: 400 });
     }
     const owned = await sql`

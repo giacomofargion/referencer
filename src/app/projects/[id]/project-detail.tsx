@@ -74,7 +74,16 @@ export function ProjectDetail({
     void audio
       .play()
       .then(() => setPlayingId(referenceId))
-      .catch(() => toast.error("Couldn't play this preview"));
+      .catch((error: unknown) => {
+        // Rapid track switches abort the previous play() — ignore those.
+        if (
+          (error instanceof DOMException || error instanceof Error) &&
+          error.name === "AbortError"
+        ) {
+          return;
+        }
+        toast.error("Couldn't play this preview");
+      });
   }
 
   async function handleRename() {

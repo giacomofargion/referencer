@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 
 import { sql } from "@/lib/db";
+import { isUuid } from "@/lib/ids";
 import { presignUpload } from "@/lib/r2";
 
 const ALLOWED_CONTENT_TYPES = new Set([
@@ -49,6 +50,9 @@ export async function POST(request: Request) {
   let projectId: string | null = null;
   if (body.projectId) {
     const trimmed = body.projectId.trim();
+    if (!isUuid(trimmed)) {
+      return NextResponse.json({ error: "Invalid projectId" }, { status: 400 });
+    }
     const owned = await sql`
       SELECT id FROM projects
       WHERE id = ${trimmed} AND clerk_user_id = ${userId}

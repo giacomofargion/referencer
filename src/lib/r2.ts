@@ -1,6 +1,8 @@
 import {
   GetObjectCommand,
   HeadObjectCommand,
+  NoSuchKey,
+  NotFound,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -64,9 +66,21 @@ export function presignPlayback(objectKey: string) {
   );
 }
 
+/** True when env vars for R2 are missing (optional integration). */
+export function isR2NotConfiguredError(error: unknown): boolean {
+  return (
+    error instanceof Error && error.message.startsWith("R2 is not configured")
+  );
+}
+
+function isObjectNotFoundError(error: unknown): boolean {
+  return error instanceof NotFound || error instanceof NoSuchKey;
+}
+
 /**
  * Whether the object was actually stored. Presigning alone never checks —
  * uploads from before R2 was configured have keys but no object.
+ * Credential / network failures are rethrown so callers can return 5xx.
  */
 export async function objectExists(objectKey: string): Promise<boolean> {
   const { bucket } = getConfig();
@@ -75,7 +89,8 @@ export async function objectExists(objectKey: string): Promise<boolean> {
       new HeadObjectCommand({ Bucket: bucket, Key: objectKey }),
     );
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (isObjectNotFoundError(error)) return false;
+    throw error;
   }
 }

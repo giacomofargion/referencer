@@ -2,7 +2,11 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 import { sql } from "@/lib/db";
-import { objectExists, presignPlayback } from "@/lib/r2";
+import {
+  isR2NotConfiguredError,
+  objectExists,
+  presignPlayback,
+} from "@/lib/r2";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -37,10 +41,18 @@ export async function GET(_request: Request, context: RouteContext) {
     }
     const playbackUrl = await presignPlayback(objectKey);
     return NextResponse.json({ playbackUrl });
-  } catch {
+  } catch (error) {
+    // Optional R2 — same soft miss as an unstored clip.
+    if (isR2NotConfiguredError(error)) {
+      return NextResponse.json(
+        { error: "Client audio not available" },
+        { status: 404 },
+      );
+    }
+    console.error("R2 playback failed:", error);
     return NextResponse.json(
-      { error: "Client audio not available" },
-      { status: 404 },
+      { error: "Audio storage unavailable" },
+      { status: 503 },
     );
   }
 }

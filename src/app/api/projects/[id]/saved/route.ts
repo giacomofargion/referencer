@@ -41,8 +41,13 @@ export async function POST(request: Request, context: RouteContext) {
     );
   }
 
-  const note =
-    typeof body.note === "string" ? body.note.trim().slice(0, MAX_NOTE_LENGTH) : null;
+  // Omitted note → keep existing on upsert; "" / whitespace → clear to null.
+  const noteProvided = Object.prototype.hasOwnProperty.call(body, "note");
+  const note = noteProvided
+    ? typeof body.note === "string"
+      ? body.note.trim().slice(0, MAX_NOTE_LENGTH) || null
+      : null
+    : null;
 
   const refs = await sql`
     SELECT id FROM reference_tracks WHERE id = ${referenceTrackId} LIMIT 1
@@ -56,9 +61,12 @@ export async function POST(request: Request, context: RouteContext) {
 
   const [row] = await sql`
     INSERT INTO saved_references (project_id, reference_track_id, note)
-    VALUES (${projectId}, ${referenceTrackId}, ${note || null})
+    VALUES (${projectId}, ${referenceTrackId}, ${note})
     ON CONFLICT (project_id, reference_track_id)
-    DO UPDATE SET note = COALESCE(EXCLUDED.note, saved_references.note)
+    DO UPDATE SET note = CASE
+      WHEN ${noteProvided} THEN EXCLUDED.note
+      ELSE saved_references.note
+    END
     RETURNING id, created_at, note
   `;
 
