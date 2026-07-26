@@ -30,11 +30,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = (await request.json()) as {
+  let body: {
     title?: string;
     contentType?: string;
     projectId?: string | null;
   };
+  try {
+    body = (await request.json()) as {
+      title?: string;
+      contentType?: string;
+      projectId?: string | null;
+    };
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
   const title = body.title?.trim();
   if (!title || title.length > MAX_TITLE_LENGTH) {
@@ -65,11 +74,21 @@ export async function POST(request: Request) {
   }
 
   const objectKey = `client-uploads/${userId}/${randomUUID()}`;
-  const [row] = await sql`
-    INSERT INTO client_uploads (clerk_user_id, r2_object_key, title, project_id)
-    VALUES (${userId}, ${objectKey}, ${title}, ${projectId})
-    RETURNING id, project_id
-  `;
+  let row: Record<string, unknown>;
+  try {
+    const rows = await sql`
+      INSERT INTO client_uploads (clerk_user_id, r2_object_key, title, project_id)
+      VALUES (${userId}, ${objectKey}, ${title}, ${projectId})
+      RETURNING id, project_id
+    `;
+    row = rows[0] as Record<string, unknown>;
+  } catch (error) {
+    console.error("Upload insert failed:", error);
+    return NextResponse.json(
+      { error: "Could not create upload record" },
+      { status: 500 },
+    );
+  }
 
   // R2 is optional until the bucket/creds are configured — analysis +
   // matching still work with a local blob URL for A/B playback.

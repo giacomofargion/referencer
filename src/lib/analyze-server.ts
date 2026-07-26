@@ -1,4 +1,5 @@
-import { AudioContext } from "node-web-audio-api";
+import decodeAac from "@audio/decode-aac";
+import decodeMp3 from "@audio/decode-mp3";
 import { Essentia, EssentiaWASM } from "essentia.js";
 
 import type { FeatureVector } from "@/lib/types";
@@ -120,26 +121,49 @@ function computeTempo(
   return result.bpm as number;
 }
 
-/** Decode any browser-supported audio buffer (AAC/M4A previews included). */
+function looksLikeMp3(bytes: Uint8Array): boolean {
+  if (bytes.length >= 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    return true;
+  }
+  return bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
+}
+
+function looksLikeMp4Family(bytes: Uint8Array): boolean {
+  // ISO BMFF: size(4) + 'ftyp'(4) — iTunes previews are typically M4A/AAC.
+  if (bytes.length < 8) return false;
+  return (
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  );
+}
+
+/**
+ * Decode MP3 clips and AAC/M4A iTunes previews to PCM via WASM codecs.
+ * Avoids native `node-web-audio-api` (needs libasound — missing on Vercel).
+ */
 export async function decodeAudioBytes(
   bytes: ArrayBuffer,
 ): Promise<{ left: Float32Array; right: Float32Array; sampleRate: number }> {
-  const ctx = new AudioContext({ sampleRate: 44100 });
-  try {
-    const audioBuffer = await ctx.decodeAudioData(bytes.slice(0));
-    const left = audioBuffer.getChannelData(0);
-    const right =
-      audioBuffer.numberOfChannels > 1
-        ? audioBuffer.getChannelData(1)
-        : audioBuffer.getChannelData(0);
-    return {
-      left: new Float32Array(left),
-      right: new Float32Array(right),
-      sampleRate: audioBuffer.sampleRate,
-    };
-  } finally {
-    await ctx.close();
+  const view = new Uint8Array(bytes.slice(0));
+  const decoded = looksLikeMp3(view)
+    ? await decodeMp3(view)
+    : looksLikeMp4Family(view)
+      ? await decodeAac(view)
+      : await decodeAac(view).catch(async () => decodeMp3(view));
+
+  const channels = decoded.channelData;
+  if (!channels?.length || !decoded.sampleRate) {
+    throw new Error("Audio decode produced no PCM");
   }
+  const left = channels[0];
+  const right = channels.length > 1 ? channels[1] : channels[0];
+  return {
+    left: new Float32Array(left),
+    right: new Float32Array(right),
+    sampleRate: decoded.sampleRate,
+  };
 }
 
 /** Extract the shared feature vector from decoded stereo channels. */

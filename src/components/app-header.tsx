@@ -1,15 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import {
-  Show,
-  SignInButton,
-  SignUpButton,
-  UserButton,
-} from "@clerk/nextjs";
+import { useAuth, UserButton } from "@clerk/nextjs";
 
 import { CreditsBalance } from "@/components/credits-balance";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 function TonemapMark({ className }: { className?: string }) {
   return (
@@ -34,6 +30,12 @@ function TonemapMark({ className }: { className?: string }) {
 }
 
 export function AppHeader() {
+  const { isLoaded, isSignedIn } = useAuth();
+  // Show auth CTAs unless we know the user is signed in. Clerk's <Show> hides
+  // both branches while loading — and if the Clerk domain DNS is missing, that
+  // "loading" state never resolves, so the header looked empty.
+  const showSignedOutActions = !isLoaded || !isSignedIn;
+
   return (
     <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface-0/70 px-6 backdrop-blur-md">
       <Link href="/" className="flex items-center gap-2.5">
@@ -47,40 +49,47 @@ export function AppHeader() {
       </Link>
 
       <div className="flex items-center gap-4">
-        <Show when="signed-out">
-          <SignInButton mode="modal">
-            <Button variant="outline" size="sm">
+        {showSignedOutActions ? (
+          <>
+            <Link
+              href="/sign-in"
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+            >
               Sign in
-            </Button>
-          </SignInButton>
-          <SignUpButton mode="modal">
-            <Button size="sm">Sign up</Button>
-          </SignUpButton>
-        </Show>
-        <Show when="signed-in">
-          <nav className="flex items-center gap-4 text-sm">
-            <Link
-              href="/history"
-              className="text-text-secondary transition-colors hover:text-text-primary"
-            >
-              History
             </Link>
             <Link
-              href="/projects"
-              className="text-text-secondary transition-colors hover:text-text-primary"
+              href="/sign-up"
+              className={cn(buttonVariants({ size: "sm" }))}
             >
-              Projects
+              Sign up
             </Link>
-          </nav>
-          <CreditsBalance />
-          <UserButton
-            appearance={{
-              elements: {
-                avatarBox: "size-8",
-              },
-            }}
-          />
-        </Show>
+          </>
+        ) : (
+          <>
+            <nav className="flex items-center gap-4 text-sm">
+              <Link
+                href="/history"
+                className="text-text-secondary transition-colors hover:text-text-primary"
+              >
+                History
+              </Link>
+              <Link
+                href="/projects"
+                className="text-text-secondary transition-colors hover:text-text-primary"
+              >
+                Projects
+              </Link>
+            </nav>
+            <CreditsBalance />
+            <UserButton
+              appearance={{
+                elements: {
+                  avatarBox: "size-8",
+                },
+              }}
+            />
+          </>
+        )}
       </div>
     </header>
   );

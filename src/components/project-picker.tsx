@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useAuthedFetch } from "@/hooks/use-authed-fetch";
+import { readApiJson, usePromptSignIn } from "@/hooks/use-prompt-sign-in";
 
 export interface ProjectOption {
   id: string;
@@ -31,8 +34,10 @@ interface ProjectPickerProps {
 
 const NONE_VALUE = "__none__";
 
-async function fetchProjects(): Promise<ProjectOption[]> {
-  const response = await fetch("/api/projects");
+async function fetchProjects(
+  authedFetch: typeof fetch,
+): Promise<ProjectOption[]> {
+  const response = await authedFetch("/api/projects");
   if (!response.ok) return [];
   const data = (await response.json()) as { projects: ProjectOption[] };
   return data.projects;
@@ -45,6 +50,9 @@ export function ProjectPicker({
   disabled,
   knownOption = null,
 }: ProjectPickerProps) {
+  const { isLoaded: authLoaded, isSignedIn } = useAuth();
+  const promptSignIn = usePromptSignIn();
+  const authedFetch = useAuthedFetch();
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
@@ -52,10 +60,11 @@ export function ProjectPicker({
   const projectFieldId = useId();
 
   useEffect(() => {
+    if (!authLoaded || !isSignedIn) return;
     let cancelled = false;
     (async () => {
       try {
-        const next = await fetchProjects();
+        const next = await fetchProjects(authedFetch);
         if (!cancelled) setProjects(next);
       } catch {
         // Picker is optional — ignore load failures.
@@ -64,10 +73,11 @@ export function ProjectPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authLoaded, isSignedIn, authedFetch]);
 
   // One-time mount list can miss projects assigned via the save dialog.
   useEffect(() => {
+    if (!authLoaded || !isSignedIn) return;
     if (value === null) return;
     if (projects.some((project) => project.id === value)) return;
     if (knownOption?.id === value) return;
@@ -75,7 +85,7 @@ export function ProjectPicker({
     let cancelled = false;
     (async () => {
       try {
-        const next = await fetchProjects();
+        const next = await fetchProjects(authedFetch);
         if (!cancelled) setProjects(next);
       } catch {
         // ignore
@@ -84,7 +94,7 @@ export function ProjectPicker({
     return () => {
       cancelled = true;
     };
-  }, [value, projects, knownOption]);
+  }, [authLoaded, isSignedIn, authedFetch, value, projects, knownOption]);
 
   const options = useMemo(() => {
     if (!knownOption) return projects;
@@ -94,7 +104,22 @@ export function ProjectPicker({
     return [knownOption, ...projects];
   }, [projects, knownOption]);
 
+  function beginCreate() {
+    if (!authLoaded) return;
+    if (!isSignedIn) {
+      promptSignIn();
+      return;
+    }
+    setCreating(true);
+  }
+
   async function handleCreate() {
+    if (!authLoaded) return;
+    if (!isSignedIn) {
+      promptSignIn();
+      return;
+    }
+
     const name = newName.trim();
     if (!name) {
       toast.error("Enter a project name");
@@ -102,18 +127,21 @@ export function ProjectPicker({
     }
     setBusy(true);
     try {
-      const response = await fetch("/api/projects", {
+      const response = await authedFetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
-      if (!response.ok) {
-        const { error } = await response.json();
-        throw new Error(error ?? "Could not create project");
+      const parsed = await readApiJson<{ project: ProjectOption }>(response);
+      if (!parsed.ok) {
+        if (parsed.unauthenticated) {
+          promptSignIn();
+          return;
+        }
+        throw new Error(parsed.error);
       }
-      const data = (await response.json()) as { project: ProjectOption };
-      setProjects((prev) => [data.project, ...prev]);
-      onChange(data.project.id);
+      setProjects((prev) => [parsed.data.project, ...prev]);
+      onChange(parsed.data.project.id);
       setNewName("");
       setCreating(false);
     } catch (error) {
@@ -198,7 +226,7 @@ export function ProjectPicker({
             type="button"
             size="sm"
             variant="outline"
-            onClick={() => setCreating(true)}
+            onClick={beginCreate}
             disabled={disabled}
           >
             New project

@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { readApiJson, usePromptSignIn } from "@/hooks/use-prompt-sign-in";
 
 export interface ProjectOption {
   id: string;
@@ -43,6 +44,7 @@ export function AssignProjectDialog({
   uploadId,
   onAssigned,
 }: AssignProjectDialogProps) {
+  const promptSignIn = usePromptSignIn();
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [newName, setNewName] = useState("");
@@ -89,14 +91,17 @@ export function AssignProjectDialog({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name }),
         });
-        if (!createResponse.ok) {
-          const { error } = await createResponse.json();
-          throw new Error(error ?? "Could not create project");
+        const created = await readApiJson<{ project: ProjectOption }>(
+          createResponse,
+        );
+        if (!created.ok) {
+          if (created.unauthenticated) {
+            promptSignIn();
+            return;
+          }
+          throw new Error(created.error);
         }
-        const created = (await createResponse.json()) as {
-          project: ProjectOption;
-        };
-        project = created.project;
+        project = created.data.project;
       } else {
         const picked = projects.find((p) => p.id === selectedId);
         if (!picked) {

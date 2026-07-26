@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useAuth, useClerk } from "@clerk/nextjs";
+import { useAuth } from "@clerk/nextjs";
 import { motion } from "motion/react";
 import { toast } from "sonner";
 
@@ -18,6 +18,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { openBuyCreditsDialog } from "@/components/credits-balance";
+import { useAuthedFetch } from "@/hooks/use-authed-fetch";
+import { readApiJson, usePromptSignIn } from "@/hooks/use-prompt-sign-in";
 import { analyzeAudioFile } from "@/lib/analysis";
 import { encodeClipMp3 } from "@/lib/encode-clip";
 import {
@@ -43,7 +45,8 @@ type Phase =
 
 export function UploadCard() {
   const { isLoaded: authLoaded, isSignedIn } = useAuth();
-  const { openSignIn } = useClerk();
+  const promptSignIn = usePromptSignIn();
+  const authedFetch = useAuthedFetch();
   const [file, setFile] = useState<File | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
   // Keeps the picker label correct when a project is assigned via the save dialog.
@@ -108,19 +111,6 @@ export function UploadCard() {
     setLightboxOpen(false);
   }
 
-  function promptSignIn() {
-    toast.message(
-      "Sign in to find references — new accounts get 2 free searches.",
-      {
-        action: {
-          label: "Sign in",
-          onClick: () => openSignIn({}),
-        },
-      },
-    );
-    openSignIn({});
-  }
-
   async function handleAnalyze() {
     if (!file) return;
     // Soft gate: keep the file selected, open Clerk before any API/WASM work.
@@ -148,7 +138,7 @@ export function UploadCard() {
       });
 
       setPhase({ step: "uploading" });
-      const createResponse = await fetch("/api/uploads", {
+      const createResponse = await authedFetch("/api/uploads", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -157,24 +147,21 @@ export function UploadCard() {
           projectId,
         }),
       });
-      if (!createResponse.ok) {
-        // Clerk may return HTML for unauthenticated API hits — never JSON.parse blind.
-        const contentType = createResponse.headers.get("content-type") ?? "";
-        if (createResponse.status === 401 || !contentType.includes("json")) {
+      const created = await readApiJson<{
+        uploadId: string;
+        projectId: string | null;
+        uploadUrl: string | null;
+      }>(createResponse);
+      if (!created.ok) {
+        if (created.unauthenticated) {
           promptSignIn();
           setPhase({ step: "idle" });
           return;
         }
-        const { error } = (await createResponse.json()) as { error?: string };
-        throw new Error(error ?? "Could not create upload");
+        throw new Error(created.error);
       }
-      const created = (await createResponse.json()) as {
-        uploadId: string;
-        projectId: string | null;
-        uploadUrl: string | null;
-      };
-      const { uploadId, uploadUrl } = created;
-      const sessionProjectId = created.projectId ?? projectId;
+      const { uploadId, uploadUrl } = created.data;
+      const sessionProjectId = created.data.projectId ?? projectId;
 
       // R2 may not be configured yet — analysis + matching still work.
       if (uploadUrl) {
@@ -190,13 +177,19 @@ export function UploadCard() {
         }
       }
 
-      const patchResponse = await fetch(`/api/uploads/${uploadId}`, {
+      const patchResponse = await authedFetch(`/api/uploads/${uploadId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ featureVector }),
       });
-      if (!patchResponse.ok) {
-        throw new Error("Could not save analysis");
+      const patched = await readApiJson<{ ok?: boolean }>(patchResponse);
+      if (!patched.ok) {
+        if (patched.unauthenticated) {
+          promptSignIn();
+          setPhase({ step: "idle" });
+          return;
+        }
+        throw new Error(patched.error || "Could not save analysis");
       }
 
       setPhase({ step: "matching" });
@@ -204,20 +197,26 @@ export function UploadCard() {
       matchForm.append("uploadId", uploadId);
       matchForm.append("audio", clip, "clip.mp3");
 
-      const matchResponse = await fetch("/api/match", {
+      const matchResponse = await authedFetch("/api/match", {
         method: "POST",
         body: matchForm,
       });
-      if (!matchResponse.ok) {
-        const body = (await matchResponse.json()) as {
-          error?: string;
-          code?: string;
-        };
+      const matched = await readApiJson<{
+        matches: MatchResult[];
+        projectId?: string | null;
+        discoveryNote: string | null;
+      }>(matchResponse);
+      if (!matched.ok) {
+        if (matched.unauthenticated) {
+          promptSignIn();
+          setPhase({ step: "idle" });
+          return;
+        }
         if (
-          matchResponse.status === 402 ||
-          body.code === "INSUFFICIENT_CREDITS"
+          matched.status === 402 ||
+          matched.code === "INSUFFICIENT_CREDITS"
         ) {
-          toast.error(body.error ?? "You’re out of credits", {
+          toast.error(matched.error || "You’re out of credits", {
             action: {
               label: "Buy credits",
               onClick: () => openBuyCreditsDialog(),
@@ -226,14 +225,9 @@ export function UploadCard() {
           setPhase({ step: "idle" });
           return;
         }
-        throw new Error(body.error ?? "Matching failed");
+        throw new Error(matched.error);
       }
-
-      const result = (await matchResponse.json()) as {
-        matches: MatchResult[];
-        projectId?: string | null;
-        discoveryNote: string | null;
-      };
+      const result = matched.data;
 
       setPhase({
         step: "done",
@@ -328,7 +322,7 @@ export function UploadCard() {
                     : current,
                 );
 
-                void fetch(`/api/sessions/${uploadId}`, {
+                void authedFetch(`/api/sessions/${uploadId}`, {
                   method: "PATCH",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ projectId: next }),

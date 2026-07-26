@@ -1,4 +1,5 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
 
 const isPublicRoute = createRouteMatcher([
   "/",
@@ -8,10 +9,22 @@ const isPublicRoute = createRouteMatcher([
   "/api/credits/webhook",
 ]);
 
+const isApiRoute = createRouteMatcher(["/api(.*)"]);
+
 export default clerkMiddleware(async (auth, request) => {
-  if (!isPublicRoute(request)) {
-    await auth.protect();
+  if (isPublicRoute(request)) return;
+
+  // API handlers already return JSON 401 via auth(). Don't HTML-redirect
+  // /api/* to /sign-in — that makes the browser parse "<!DOCTYPE..." as JSON.
+  if (isApiRoute(request)) {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    return;
   }
+
+  await auth.protect();
 });
 
 export const config = {

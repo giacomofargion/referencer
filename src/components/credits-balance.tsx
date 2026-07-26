@@ -13,6 +13,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { useAuthedFetch } from "@/hooks/use-authed-fetch";
 
 const PACKS = [1, 5, 10, 20, 50] as const;
 const MAX_QUANTITY = 100;
@@ -32,27 +33,25 @@ function formatGbp(pence: number): string {
 }
 
 export function CreditsBalance() {
+  const authedFetch = useAuthedFetch();
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<BalancePayload | null>(null);
   const [quantity, setQuantity] = useState(5);
   const [customValue, setCustomValue] = useState("5");
   const [buying, setBuying] = useState(false);
 
-  async function loadBalance() {
-    const response = await fetch("/api/credits/balance");
-    if (!response.ok) return null;
-    return (await response.json()) as BalancePayload;
-  }
-
   useEffect(() => {
     let cancelled = false;
-    void loadBalance().then((payload) => {
-      if (!cancelled && payload) setData(payload);
-    });
+    void (async () => {
+      const response = await authedFetch("/api/credits/balance");
+      if (!response.ok) return;
+      const payload = (await response.json()) as BalancePayload;
+      if (!cancelled) setData(payload);
+    })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authedFetch]);
 
   // Deep-link + post-checkout feedback via query params (no /credits page).
   useEffect(() => {
@@ -84,9 +83,11 @@ export function CreditsBalance() {
       // Webhook usually lands shortly after the redirect.
       timers.push(
         window.setTimeout(() => {
-          void loadBalance().then((payload) => {
-            if (payload) setData(payload);
-          });
+          void (async () => {
+            const response = await authedFetch("/api/credits/balance");
+            if (!response.ok) return;
+            setData((await response.json()) as BalancePayload);
+          })();
         }, 1200),
       );
     }
@@ -94,7 +95,7 @@ export function CreditsBalance() {
     return () => {
       for (const id of timers) window.clearTimeout(id);
     };
-  }, []);
+  }, [authedFetch]);
 
   useEffect(() => {
     function onBuyRequest() {
@@ -113,7 +114,7 @@ export function CreditsBalance() {
   async function checkout() {
     setBuying(true);
     try {
-      const response = await fetch("/api/credits/checkout", {
+      const response = await authedFetch("/api/credits/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ quantity }),
