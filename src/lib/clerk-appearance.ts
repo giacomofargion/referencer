@@ -65,7 +65,6 @@ export const clerkAppearance = {
     userButtonPopoverCard: "bg-surface-1 border border-border shadow-none",
     userButtonPopoverActionButton:
       "text-text-secondary hover:bg-surface-2 hover:text-text-primary",
-    userButtonPopoverActionButtonText: "text-inherit",
     userButtonPopoverFooter: "hidden",
   },
 } as const;
