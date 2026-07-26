@@ -28,6 +28,7 @@ Picking reference tracks is slow and subjective. Engineers often jump between st
 | **Similarity ranking** | Weighted multi-feature distance with tone / loudness / balanced presets; client-side re-rank without a second API call |
 | **External APIs**      | Cyanite (similar-track discovery), iTunes Search (previews + metadata), Spotify oEmbed                                 |
 | **Backend**            | Next.js Route Handlers with Clerk auth, Neon Postgres feature cache, optional Cloudflare R2 uploads                    |
+| **Payments**           | Stripe Checkout for one-time credit packs; per-user wallet in Neon; 1 credit = 1 Cyanite similarity search             |
 | **UX**                 | Upload → analyze → match flow, match carousel, EQ curve visuals, A/B player for engineer review                        |
 | **Product craft**      | Auth-gated app, webhook + polling for async analysis, env-driven integrations                                          |
 
@@ -41,6 +42,7 @@ Picking reference tracks is slow and subjective. Engineers often jump between st
 - **Data:** Neon Postgres · Cloudflare R2 (optional object storage)
 - **Audio:** Essentia.js (WASM) · server-side preview analysis via `node-web-audio-api`
 - **Discovery:** Cyanite.ai · iTunes Search API · Spotify oEmbed
+- **Payments:** Stripe Checkout (one-time credits)
 
 ---
 
@@ -98,7 +100,26 @@ Picking reference tracks is slow and subjective. Engineers often jump between st
 
 Add your production origin to `AllowedOrigins` when you deploy. Without this policy, the browser blocks the presigned PUT with a CORS error.
 
-Schema for projects / saved refs: `scripts/migrations/001_projects_history.sql`
+Schema for projects / saved refs: `scripts/migrations/001_projects_history.sql`  
+Credits wallet: `scripts/migrations/002_credits.sql`
+
+### Credits & Stripe
+
+Each similarity search spends **1 credit** from the signed-in user’s wallet before Cyanite runs. Failed Cyanite calls refund the credit. New users get a one-time starter grant (`FREE_STARTER_CREDITS`, default 2).
+
+1. Create a Stripe account → copy **Secret key** and **Publishable key** into `.env.local`.
+2. Set `CREDIT_PRICE_CENTS` (GBP pence per credit; default `190` = £1.90).
+3. Local webhook forwarding:
+
+```bash
+stripe listen --forward-to localhost:3000/api/credits/webhook
+```
+
+Paste the webhook signing secret into `STRIPE_WEBHOOK_SECRET`.
+
+4. Production: point a Stripe webhook at `https://YOUR_DOMAIN/api/credits/webhook` for `checkout.session.completed`.
+
+Buy UI: header **Buy** opens a dialog (presets + custom quantity) → Stripe Checkout.
 
 ---
 
@@ -107,9 +128,9 @@ Schema for projects / saved refs: `scripts/migrations/001_projects_history.sql`
 ```
 src/
   app/              # home, history, projects, session reopen
-  app/api/          # uploads, match, projects, sessions, Cyanite webhook
-  components/       # upload flow, match UI, A/B player, EQ graphs
-  lib/              # analysis, ranking, Cyanite, iTunes, R2, DB
+  app/api/          # uploads, match, projects, sessions, credits, webhooks
+  components/       # upload flow, match UI, A/B player, EQ graphs, credit buy dialog
+  lib/              # analysis, ranking, Cyanite, credits, Stripe, iTunes, R2, DB
 scripts/migrations/ # Neon SQL migrations
 public/
   essentia/         # WASM runtime for in-browser analysis

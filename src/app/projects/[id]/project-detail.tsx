@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { PauseIcon, PlayIcon } from "lucide-react";
+import { ChevronRightIcon, PauseIcon, PlayIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -223,20 +223,30 @@ export function ProjectDetail({
             assign from a session after starring a reference.
           </p>
         ) : (
-          <ul className="flex flex-col divide-y divide-border border-y border-border">
+          <ul className="flex flex-col gap-2">
             {sessions.map((session) => (
               <li key={session.id}>
                 <Link
-                  href={`/sessions/${session.id}`}
-                  className="flex flex-col gap-1 py-3 transition-colors hover:bg-surface-1/60 sm:flex-row sm:items-center sm:justify-between"
+                  href={`/sessions/${session.id}?from=${encodeURIComponent(`/projects/${projectId}`)}`}
+                  className="group flex items-center gap-3 rounded-lg border border-border bg-surface-1 px-3 py-3 transition-colors hover:border-text-muted hover:bg-surface-2"
                 >
-                  <span className="font-medium text-text-primary">
-                    {session.title}
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="truncate font-medium text-text-primary group-hover:text-client">
+                      {session.title}
+                    </span>
+                    <span className="font-mono text-xs text-text-muted">
+                      {formatSessionDate(session.createdAt)} ·{" "}
+                      {session.matchCount} ref
+                      {session.matchCount === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <span className="hidden shrink-0 text-xs text-text-secondary sm:inline">
+                    View references
                   </span>
-                  <span className="font-mono text-xs text-text-muted">
-                    {formatSessionDate(session.createdAt)} ·{" "}
-                    {session.matchCount} refs
-                  </span>
+                  <ChevronRightIcon
+                    className="size-4 shrink-0 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-client"
+                    aria-hidden
+                  />
                 </Link>
               </li>
             ))}

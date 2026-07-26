@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useAuth, useClerk } from "@clerk/nextjs";
 import { motion } from "motion/react";
 import { toast } from "sonner";
 
@@ -16,6 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { openBuyCreditsDialog } from "@/components/credits-balance";
 import { analyzeAudioFile } from "@/lib/analysis";
 import { encodeClipMp3 } from "@/lib/encode-clip";
 import {
@@ -40,6 +42,8 @@ type Phase =
     };
 
 export function UploadCard() {
+  const { isLoaded: authLoaded, isSignedIn } = useAuth();
+  const { openSignIn } = useClerk();
   const [file, setFile] = useState<File | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
   // Keeps the picker label correct when a project is assigned via the save dialog.
@@ -104,8 +108,27 @@ export function UploadCard() {
     setLightboxOpen(false);
   }
 
+  function promptSignIn() {
+    toast.message(
+      "Sign in to find references — new accounts get 2 free searches.",
+      {
+        action: {
+          label: "Sign in",
+          onClick: () => openSignIn({}),
+        },
+      },
+    );
+    openSignIn({});
+  }
+
   async function handleAnalyze() {
     if (!file) return;
+    // Soft gate: keep the file selected, open Clerk before any API/WASM work.
+    if (!authLoaded) return;
+    if (!isSignedIn) {
+      promptSignIn();
+      return;
+    }
 
     try {
       // Drop previous matches immediately so old results never linger
@@ -135,7 +158,14 @@ export function UploadCard() {
         }),
       });
       if (!createResponse.ok) {
-        const { error } = await createResponse.json();
+        // Clerk may return HTML for unauthenticated API hits — never JSON.parse blind.
+        const contentType = createResponse.headers.get("content-type") ?? "";
+        if (createResponse.status === 401 || !contentType.includes("json")) {
+          promptSignIn();
+          setPhase({ step: "idle" });
+          return;
+        }
+        const { error } = (await createResponse.json()) as { error?: string };
         throw new Error(error ?? "Could not create upload");
       }
       const created = (await createResponse.json()) as {
@@ -179,8 +209,24 @@ export function UploadCard() {
         body: matchForm,
       });
       if (!matchResponse.ok) {
-        const { error } = await matchResponse.json();
-        throw new Error(error ?? "Matching failed");
+        const body = (await matchResponse.json()) as {
+          error?: string;
+          code?: string;
+        };
+        if (
+          matchResponse.status === 402 ||
+          body.code === "INSUFFICIENT_CREDITS"
+        ) {
+          toast.error(body.error ?? "You’re out of credits", {
+            action: {
+              label: "Buy credits",
+              onClick: () => openBuyCreditsDialog(),
+            },
+          });
+          setPhase({ step: "idle" });
+          return;
+        }
+        throw new Error(body.error ?? "Matching failed");
       }
 
       const result = (await matchResponse.json()) as {
@@ -306,16 +352,26 @@ export function UploadCard() {
               disabled={busy}
             />
 
-            <div className="flex flex-wrap items-center gap-3">
-              <Button onClick={handleAnalyze} disabled={!file || busy}>
-                {phase.step === "analyzing"
-                  ? "Analyzing…"
-                  : phase.step === "uploading"
-                    ? "Saving…"
-                    : phase.step === "matching"
-                      ? "Finding references…"
-                      : "Analyze track"}
-              </Button>
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  onClick={() => void handleAnalyze()}
+                  disabled={!file || busy || !authLoaded}
+                >
+                  {phase.step === "analyzing"
+                    ? "Analyzing…"
+                    : phase.step === "uploading"
+                      ? "Saving…"
+                      : phase.step === "matching"
+                        ? "Finding references…"
+                        : "Analyze track"}
+                </Button>
+              </div>
+              {authLoaded && !isSignedIn ? (
+                <p className="text-xs text-text-muted">
+                  Sign in to run the search — new accounts get 2 free credits.
+                </p>
+              ) : null}
             </div>
 
             {phase.step === "done" && (

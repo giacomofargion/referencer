@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import type { MatchResult } from "@/components/match-card";
 import { ReferencesLightbox } from "@/components/references-lightbox";
@@ -22,6 +24,12 @@ export interface SessionResultsProps {
   discoveryNote?: string | null;
 }
 
+/** Only allow in-app relative paths so ?from= can't open external URLs. */
+function safeReturnPath(raw: string | null): string | null {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return null;
+  return raw;
+}
+
 /** Reopen a past match session with the same lightbox + save controls. */
 export function SessionResults({
   uploadId,
@@ -32,6 +40,12 @@ export function SessionResults({
   matches: initialMatches,
   discoveryNote = null,
 }: SessionResultsProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const returnTo =
+    safeReturnPath(searchParams.get("from")) ??
+    (initialProjectId ? `/projects/${initialProjectId}` : null);
+
   const [projectId, setProjectId] = useState(initialProjectId);
   const [projectName, setProjectName] = useState(initialProjectName);
   const [matches, setMatches] = useState(initialMatches);
@@ -41,6 +55,14 @@ export function SessionResults({
   const [clientPlaybackUrl, setClientPlaybackUrl] = useState<string | null>(
     null,
   );
+
+  function handleLightboxOpenChange(open: boolean) {
+    if (!open && returnTo) {
+      router.push(returnTo);
+      return;
+    }
+    setLightboxOpen(open);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -86,10 +108,15 @@ export function SessionResults({
             {title}
           </h1>
           <p className="text-sm text-text-muted">
-            {projectName ? (
+            {projectName && projectId ? (
               <>
                 Project{" "}
-                <span className="text-text-secondary">{projectName}</span>
+                <Link
+                  href={`/projects/${projectId}`}
+                  className="text-text-secondary underline-offset-2 hover:text-client hover:underline"
+                >
+                  {projectName}
+                </Link>
                 {" · "}
               </>
             ) : (
@@ -109,7 +136,7 @@ export function SessionResults({
 
       <ReferencesLightbox
         open={lightboxOpen}
-        onOpenChange={setLightboxOpen}
+        onOpenChange={handleLightboxOpenChange}
         matches={displayedMatches}
         activeIndex={safeActiveIndex}
         onActiveIndexChange={setActiveIndex}

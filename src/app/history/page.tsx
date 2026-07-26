@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { ChevronRightIcon } from "lucide-react";
+import { motion } from "motion/react";
 import { toast } from "sonner";
 
 import { AppHeader } from "@/components/app-header";
 import { formatSessionDate } from "@/lib/format";
+import { fadeInUp, staggerChildren } from "@/lib/motion";
 
 interface SessionRow {
   id: string;
@@ -45,54 +48,87 @@ export default function HistoryPage() {
   return (
     <>
       <AppHeader />
-      <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-12">
-        <div className="flex flex-col gap-2">
+      <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col gap-16 px-6 py-16">
+        <motion.div
+          className="flex flex-col gap-4"
+          variants={fadeInUp}
+          initial="hidden"
+          animate="visible"
+        >
           <h1 className="text-3xl font-semibold tracking-tight text-text-primary">
             History
           </h1>
-          <p className="text-sm text-text-secondary">
+          <p className="max-w-md text-sm mb-5 leading-relaxed text-text-secondary">
             Past match sessions — reopen to review references and save keepers
             to a project.
           </p>
-        </div>
+        </motion.div>
 
         {sessions === null ? (
           <p className="text-sm text-text-muted">Loading…</p>
         ) : sessions.length === 0 ? (
-          <p className="text-sm text-text-secondary">
-            No sessions yet.{" "}
-            <Link href="/" className="text-client underline-offset-2 hover:underline">
-              Analyze a track
-            </Link>{" "}
-            to get started.
-          </p>
+          <motion.div
+            variants={fadeInUp}
+            initial="hidden"
+            animate="visible"
+            className="rounded-xl border border-dashed border-border bg-surface-0 px-6 py-14 text-center"
+          >
+            <p className="mx-auto max-w-sm text-sm leading-relaxed text-text-secondary">
+              No sessions yet.{" "}
+              <Link
+                href="/"
+                className="text-client underline-offset-2 hover:underline"
+              >
+                Analyze a track
+              </Link>{" "}
+              to get started.
+            </p>
+          </motion.div>
         ) : (
-          <ul className="flex flex-col divide-y divide-border border-y border-border">
+          <motion.ul
+            className="flex flex-col gap-4"
+            variants={staggerChildren}
+            initial="hidden"
+            animate="visible"
+          >
             {sessions.map((session) => (
-              <li key={session.id}>
+              <motion.li key={session.id} variants={fadeInUp}>
                 <Link
-                  href={`/sessions/${session.id}`}
-                  className="flex flex-col gap-1 py-4 transition-colors hover:bg-surface-1/60 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+                  href={
+                    session.projectId
+                      ? `/sessions/${session.id}?from=${encodeURIComponent(`/projects/${session.projectId}`)}`
+                      : `/sessions/${session.id}?from=${encodeURIComponent("/history")}`
+                  }
+                  className="group flex items-center gap-6 rounded-xl border border-border bg-surface-1 px-5 py-6 transition-colors hover:border-text-muted hover:bg-surface-2"
                 >
-                  <div className="flex min-w-0 flex-col gap-0.5">
-                    <span className="truncate font-medium text-text-primary">
+                  <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                    <span className="truncate text-lg font-medium tracking-tight text-text-primary transition-colors group-hover:text-client">
                       {session.title}
                     </span>
-                    <span className="text-xs text-text-muted">
+                    <span className="text-sm text-text-muted">
                       {formatSessionDate(session.createdAt)}
                       {session.projectName
                         ? ` · ${session.projectName}`
                         : " · Unassigned"}
                     </span>
                   </div>
-                  <span className="shrink-0 font-mono text-xs text-text-secondary">
+
+                  <span className="hidden shrink-0 rounded-md bg-surface-0 px-2.5 py-1 font-mono text-xs text-text-secondary sm:inline">
                     {session.matchCount} ref
                     {session.matchCount === 1 ? "" : "s"}
                   </span>
+
+                  <div className="flex shrink-0 items-center gap-2 text-text-secondary">
+                    <span className="hidden text-sm sm:inline">View</span>
+                    <ChevronRightIcon
+                      className="size-4 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-client"
+                      aria-hidden
+                    />
+                  </div>
                 </Link>
-              </li>
+              </motion.li>
             ))}
-          </ul>
+          </motion.ul>
         )}
       </main>
     </>

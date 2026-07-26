@@ -18,10 +18,11 @@ export default function Home() {
           <h1 className="text-hero-gradient text-3xl font-semibold tracking-tight">
             Find a reference track
           </h1>
-          <p className="max-w-xl text-sm leading-relaxed text-text-secondary">
-            Upload an unmastered client track. We analyze loudness, frequency
-            balance, dynamics, tempo, and stereo width, then return released
-            tracks in a similar sonic ballpark — a fast starting point to find a reference.
+          <p className="max-w-xl mb-5 text-sm leading-relaxed text-text-secondary">
+            Upload an unmastered client track. We meter loudness, frequency
+            balance, dynamics, tempo, and stereo width, then use Cyanite.ai to find
+            sonically similar commercial releases on Spotify — ranked against
+            your mix so you have a concrete shortlist to A/B.
           </p>
         </div>
 

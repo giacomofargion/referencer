@@ -6,6 +6,7 @@ import {
   discoverSimilarViaCyanite,
   isCyaniteConfigured,
 } from "@/lib/cyanite";
+import { debitForMatch, refundMatch } from "@/lib/credits";
 import { sql } from "@/lib/db";
 import { explainMatch } from "@/lib/explanations";
 import { isFeatureVector } from "@/lib/feature-vector";
@@ -107,6 +108,19 @@ export async function POST(request: Request) {
     );
   }
 
+  // Spend before Cyanite so failed searches can refund without racing.
+  const balanceAfterDebit = await debitForMatch(userId, uploadId);
+  if (balanceAfterDebit === null) {
+    return NextResponse.json(
+      {
+        error: "You’re out of credits — buy more to run another search",
+        code: "INSUFFICIENT_CREDITS",
+        balance: 0,
+      },
+      { status: 402 },
+    );
+  }
+
   let sessionTrackIds: Set<number>;
   try {
     const mp3 = await toCyaniteMp3(audio, audioContentType);
@@ -118,6 +132,9 @@ export async function POST(request: Request) {
     sessionTrackIds = await hydrateCyaniteResults(similar);
   } catch (error) {
     console.error("Cyanite discovery failed:", error);
+    await refundMatch(userId, uploadId).catch((refundError) => {
+      console.error("Credit refund failed after Cyanite error:", refundError);
+    });
     return NextResponse.json(
       { error: "Similarity search failed — please try again in a moment" },
       { status: 502 },

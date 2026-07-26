@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { auth } from "@clerk/nextjs/server";
 import { notFound, redirect } from "next/navigation";
 
@@ -91,19 +92,25 @@ export default async function SessionPage({ params }: PageProps) {
     <>
       <AppHeader />
       <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col px-6 py-12">
-        <SessionResults
-          uploadId={upload.id as string}
-          title={upload.title as string}
-          projectId={projectId}
-          projectName={(upload.project_name as string | null) ?? null}
-          clientFeatures={clientFeatures}
-          matches={matches}
-          discoveryNote={
-            matches.length === 0
-              ? "No stored matches for this session."
-              : null
+        <Suspense
+          fallback={
+            <p className="text-sm text-text-muted">Loading session…</p>
           }
-        />
+        >
+          <SessionResults
+            uploadId={upload.id as string}
+            title={upload.title as string}
+            projectId={projectId}
+            projectName={(upload.project_name as string | null) ?? null}
+            clientFeatures={clientFeatures}
+            matches={matches}
+            discoveryNote={
+              matches.length === 0
+                ? "No stored matches for this session."
+                : null
+            }
+          />
+        </Suspense>
       </main>
     </>
   );

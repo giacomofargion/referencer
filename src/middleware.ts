@@ -5,6 +5,7 @@ const isPublicRoute = createRouteMatcher([
   "/sign-in(.*)",
   "/sign-up(.*)",
   "/api/cyanite/webhook",
+  "/api/credits/webhook",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
