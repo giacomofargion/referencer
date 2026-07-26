@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  PauseIcon,
+  PlayIcon,
+} from "lucide-react";
 import {
   animate,
   motion,
@@ -9,6 +14,7 @@ import {
   type PanInfo,
 } from "motion/react";
 
+import { ABPlayer } from "@/components/ab-player";
 import type { MatchResult } from "@/components/match-card";
 import { Button } from "@/components/ui/button";
 import { fadeInUp } from "@/lib/motion";
@@ -26,6 +32,10 @@ interface MatchCarouselProps {
   matches: MatchResult[];
   activeIndex: number;
   onActiveIndexChange: (index: number) => void;
+  playing: boolean;
+  onTogglePlay: () => void;
+  onPlayingChange: (playing: boolean) => void;
+  clientPlaybackUrl: string | null;
 }
 
 /** iTunes serves sized artwork URLs — bump so carousel cards stay sharp. */
@@ -38,6 +48,10 @@ export function MatchCarousel({
   matches,
   activeIndex,
   onActiveIndexChange,
+  playing,
+  onTogglePlay,
+  onPlayingChange,
+  clientPlaybackUrl,
 }: MatchCarouselProps) {
   const trackX = useMotionValue(0);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -142,11 +156,21 @@ export function MatchCarousel({
                 <motion.button
                   key={match.id}
                   type="button"
-                  onClick={() => onActiveIndexChange(index)}
-                  aria-label={`${match.title} by ${match.artist}`}
+                  onClick={() => {
+                    // Active artwork toggles preview; others just focus.
+                    if (isActive) onTogglePlay();
+                    else onActiveIndexChange(index);
+                  }}
+                  aria-label={
+                    isActive
+                      ? playing
+                        ? `Pause ${match.title}`
+                        : `Play ${match.title}`
+                      : `${match.title} by ${match.artist}`
+                  }
                   aria-current={isActive ? "true" : undefined}
                   className={cn(
-                    "relative shrink-0 overflow-hidden rounded-2xl outline-none",
+                    "group relative shrink-0 overflow-hidden rounded-2xl outline-none",
                     "focus-visible:ring-2 focus-visible:ring-client",
                     isActive && "card-glossy",
                   )}
@@ -168,6 +192,25 @@ export function MatchCarousel({
                     />
                   ) : (
                     <div className="size-full bg-surface-2" />
+                  )}
+
+                  {isActive && (
+                    <span
+                      className={cn(
+                        "pointer-events-none absolute inset-0 flex items-center justify-center bg-surface-0/35 transition-opacity",
+                        playing
+                          ? "opacity-100"
+                          : "opacity-80 group-hover:opacity-100",
+                      )}
+                    >
+                      <span className="flex size-14 items-center justify-center rounded-full bg-surface-0/85 text-text-primary shadow-lg ring-1 ring-border">
+                        {playing ? (
+                          <PauseIcon className="size-6" />
+                        ) : (
+                          <PlayIcon className="size-6 translate-x-0.5" />
+                        )}
+                      </span>
+                    </span>
                   )}
 
                   <span
@@ -214,24 +257,34 @@ export function MatchCarousel({
         )}
       </div>
 
-      <motion.div
-        key={active.id}
-        variants={fadeInUp}
-        initial="hidden"
-        animate="visible"
-        className="flex flex-col items-center gap-1 text-center"
-      >
-        <h3 className="text-xl font-semibold tracking-tight text-text-primary">
-          {active.title}
-        </h3>
-        <p className="text-sm text-text-secondary">
-          {active.artist}
-          {active.album ? ` · ${active.album}` : ""}
-        </p>
-        <p className="font-mono text-xs text-text-muted">
-          {active.genre} · score {active.distanceScore.toFixed(2)}
-        </p>
-      </motion.div>
+      <div className="flex flex-col items-center gap-3">
+        <ABPlayer
+          clientUrl={clientPlaybackUrl}
+          referenceUrl={active.previewUrl}
+          playing={playing}
+          onPlayingChange={onPlayingChange}
+          layout="inline"
+        />
+
+        <motion.div
+          key={active.id}
+          variants={fadeInUp}
+          initial="hidden"
+          animate="visible"
+          className="flex flex-col items-center gap-1 text-center"
+        >
+          <h3 className="text-xl font-semibold tracking-tight text-text-primary">
+            {active.title}
+          </h3>
+          <p className="text-sm text-text-secondary">
+            {active.artist}
+            {active.album ? ` · ${active.album}` : ""}
+          </p>
+          <p className="font-mono text-xs text-text-muted">
+            {active.genre} · score {active.distanceScore.toFixed(2)}
+          </p>
+        </motion.div>
+      </div>
     </div>
   );
 }

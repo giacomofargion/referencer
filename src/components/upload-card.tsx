@@ -5,7 +5,9 @@ import { motion } from "motion/react";
 import { toast } from "sonner";
 
 import type { MatchResult } from "@/components/match-card";
+import { ProjectPicker } from "@/components/project-picker";
 import { ReferencesLightbox } from "@/components/references-lightbox";
+import { SaveReferenceButton } from "@/components/save-reference-button";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -31,6 +33,7 @@ type Phase =
   | {
       step: "done";
       uploadId: string;
+      projectId: string | null;
       featureVector: FeatureVector;
       matches: MatchResult[];
       discoveryNote: string | null;
@@ -38,6 +41,7 @@ type Phase =
 
 export function UploadCard() {
   const [file, setFile] = useState<File | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [weightPreset, setWeightPreset] = useState<WeightPreset>("balanced");
   const [phase, setPhase] = useState<Phase>({ step: "idle" });
   const [activeIndex, setActiveIndex] = useState(0);
@@ -107,34 +111,46 @@ export function UploadCard() {
       setLightboxOpen(false);
       const featureVector = await analyzeAudioFile(file);
 
+      // One 60s MP3 clip (~1MB) serves both R2 storage and similarity
+      // search — full WAVs would be ~65x larger and reopen A/B compares
+      // against 30s lossy iTunes previews anyway. Live A/B keeps using
+      // the local file at full quality.
+      const clip = await encodeClipMp3(file).catch(() => {
+        throw new Error("Couldn't prepare the audio clip");
+      });
+
       setPhase({ step: "uploading" });
       const createResponse = await fetch("/api/uploads", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: file.name.replace(/\.[^.]+$/, ""),
-          contentType: file.type,
+          contentType: "audio/mpeg",
+          projectId,
         }),
       });
       if (!createResponse.ok) {
         const { error } = await createResponse.json();
         throw new Error(error ?? "Could not create upload");
       }
-      const { uploadId, uploadUrl } = (await createResponse.json()) as {
+      const created = (await createResponse.json()) as {
         uploadId: string;
-        uploadUrl: string;
+        projectId: string | null;
+        uploadUrl: string | null;
       };
+      const { uploadId, uploadUrl } = created;
+      const sessionProjectId = created.projectId ?? projectId;
 
       // R2 may not be configured yet — analysis + matching still work.
       if (uploadUrl) {
         const putResponse = await fetch(uploadUrl, {
           method: "PUT",
-          headers: { "Content-Type": file.type },
-          body: file,
+          headers: { "Content-Type": "audio/mpeg" },
+          body: clip,
         });
         if (!putResponse.ok) {
           toast.message(
-            "Couldn’t store the file in R2 — matching continues with local playback.",
+            "Couldn’t store the clip in R2 — matching continues with local playback.",
           );
         }
       }
@@ -149,13 +165,6 @@ export function UploadCard() {
       }
 
       setPhase({ step: "matching" });
-      // Similarity search runs on a small 60s MP3 clip — the proxy caps
-      // request bodies at 10MB, so never the raw WAV.
-      const clip = await encodeClipMp3(file).catch(() => {
-        throw new Error(
-          "Couldn't prepare the audio clip for similarity search",
-        );
-      });
       const matchForm = new FormData();
       matchForm.append("uploadId", uploadId);
       matchForm.append("audio", clip, "clip.mp3");
@@ -171,14 +180,19 @@ export function UploadCard() {
 
       const result = (await matchResponse.json()) as {
         matches: MatchResult[];
+        projectId?: string | null;
         discoveryNote: string | null;
       };
 
       setPhase({
         step: "done",
         uploadId,
+        projectId: result.projectId ?? sessionProjectId,
         featureVector,
-        matches: result.matches,
+        matches: result.matches.map((match) => ({
+          ...match,
+          saved: match.saved ?? false,
+        })),
         discoveryNote: result.discoveryNote,
       });
       setLightboxOpen(true);
@@ -234,6 +248,28 @@ export function UploadCard() {
               accept="audio/*"
               className="hidden"
               onChange={(event) => acceptFile(event.target.files?.[0])}
+            />
+
+            <ProjectPicker
+              value={phase.step === "done" ? phase.projectId : projectId}
+              onChange={(next) => {
+                setProjectId(next);
+                if (phase.step === "done") {
+                  const uploadId = phase.uploadId;
+                  setPhase({ ...phase, projectId: next });
+                  // Keep Neon in sync if the engineer reassigns after matching.
+                  void fetch(`/api/sessions/${uploadId}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ projectId: next }),
+                  }).then(async (response) => {
+                    if (!response.ok) {
+                      toast.error("Could not update project for this session");
+                    }
+                  });
+                }
+              }}
+              disabled={busy}
             />
 
             <div className="flex flex-wrap items-center gap-3">
@@ -312,6 +348,33 @@ export function UploadCard() {
               setActiveIndex(0);
             }}
             discoveryNote={phase.discoveryNote}
+            renderSaveControl={(match) => (
+              <SaveReferenceButton
+                referenceTrackId={match.id}
+                saved={Boolean(match.saved)}
+                uploadId={phase.uploadId}
+                projectId={phase.projectId}
+                onProjectAssigned={(project) => {
+                  setProjectId(project.id);
+                  setPhase((current) =>
+                    current.step === "done"
+                      ? { ...current, projectId: project.id }
+                      : current,
+                  );
+                }}
+                onSavedChange={(saved) => {
+                  setPhase((current) => {
+                    if (current.step !== "done") return current;
+                    return {
+                      ...current,
+                      matches: current.matches.map((item) =>
+                        item.id === match.id ? { ...item, saved } : item,
+                      ),
+                    };
+                  });
+                }}
+              />
+            )}
           />
         </>
       )}

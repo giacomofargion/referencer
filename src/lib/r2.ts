@@ -1,5 +1,6 @@
 import {
   GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -30,6 +31,10 @@ function getClient() {
       region: "auto",
       endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
       credentials: { accessKeyId, secretAccessKey },
+      // Browser PUTs via presigned URL: skip SDK checksum headers that
+      // force messy CORS AllowedHeaders (x-amz-checksum-*).
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
     });
   }
   return client;
@@ -57,4 +62,20 @@ export function presignPlayback(objectKey: string) {
     new GetObjectCommand({ Bucket: bucket, Key: objectKey }),
     { expiresIn: 60 * 60 },
   );
+}
+
+/**
+ * Whether the object was actually stored. Presigning alone never checks —
+ * uploads from before R2 was configured have keys but no object.
+ */
+export async function objectExists(objectKey: string): Promise<boolean> {
+  const { bucket } = getConfig();
+  try {
+    await getClient().send(
+      new HeadObjectCommand({ Bucket: bucket, Key: objectKey }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }

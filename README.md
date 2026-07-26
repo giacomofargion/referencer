@@ -67,11 +67,38 @@ Picking reference tracks is slow and subjective. Engineers often jump between st
 
 **Pipeline in practice**
 
-1. Sign in → upload an unmastered track
-2. Browser runs Essentia analysis off the main thread
+1. Sign in → optionally pick or create a **project** (client job)
+2. Upload an unmastered track — browser runs Essentia analysis off the main thread
 3. `/api/match` sends audio to Cyanite for similar Spotify tracks
 4. Candidates are resolved to iTunes previews, analyzed server-side, and cached in Neon
-5. Results return ranked with human-readable deltas; the client can re-weight tone vs loudness live
+5. Results return ranked with human-readable deltas; star keepers onto the project shortlist
+6. Reopen past runs from **History**, or browse **Projects** for sessions + saved references
+
+**Client audio storage (optional R2):** with `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET_NAME` set, each session stores the same 60s 128kbps MP3 clip used for similarity search (~1MB) rather than the full WAV — reopened sessions A/B against 30s lossy iTunes previews, so the clip is a fair comparison at ~65x less storage. Live sessions always A/B the local file at full quality. Consider an R2 lifecycle rule (e.g. delete after 180 days) to cap growth; history metadata stays in Neon either way.
+
+### Cloudflare R2 setup
+
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **R2 Object Storage** → create a bucket (e.g. `referencer-audio`).
+2. **Manage R2 API Tokens** → **Create Account API token** → Object Read & Write, scoped to that bucket. Copy **Access Key ID** and **Secret Access Key**.
+3. Account ID is the hex segment in the bucket’s S3 API URL (`https://<accountId>.r2.cloudflarestorage.com/...`).
+4. Put all four values in `.env.local` and restart `npm run dev`.
+5. **CORS (required for browser uploads):** bucket → **Settings** → **CORS Policy** → add:
+
+```json
+[
+  {
+    "AllowedOrigins": ["http://localhost:3000"],
+    "AllowedMethods": ["GET", "PUT", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Add your production origin to `AllowedOrigins` when you deploy. Without this policy, the browser blocks the presigned PUT with a CORS error.
+
+Schema for projects / saved refs: `scripts/migrations/001_projects_history.sql`
 
 ---
 
@@ -79,9 +106,11 @@ Picking reference tracks is slow and subjective. Engineers often jump between st
 
 ```
 src/
-  app/api/          # uploads, match pipeline, Cyanite webhook
+  app/              # home, history, projects, session reopen
+  app/api/          # uploads, match, projects, sessions, Cyanite webhook
   components/       # upload flow, match UI, A/B player, EQ graphs
   lib/              # analysis, ranking, Cyanite, iTunes, R2, DB
+scripts/migrations/ # Neon SQL migrations
 public/
   essentia/         # WASM runtime for in-browser analysis
   workers/          # analysis Web Worker

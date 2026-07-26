@@ -32,6 +32,7 @@ export async function POST(request: Request) {
   const body = (await request.json()) as {
     title?: string;
     contentType?: string;
+    projectId?: string | null;
   };
 
   const title = body.title?.trim();
@@ -45,11 +46,25 @@ export async function POST(request: Request) {
     );
   }
 
+  let projectId: string | null = null;
+  if (body.projectId) {
+    const trimmed = body.projectId.trim();
+    const owned = await sql`
+      SELECT id FROM projects
+      WHERE id = ${trimmed} AND clerk_user_id = ${userId}
+      LIMIT 1
+    `;
+    if (owned.length === 0) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    projectId = trimmed;
+  }
+
   const objectKey = `client-uploads/${userId}/${randomUUID()}`;
   const [row] = await sql`
-    INSERT INTO client_uploads (clerk_user_id, r2_object_key, title)
-    VALUES (${userId}, ${objectKey}, ${title})
-    RETURNING id
+    INSERT INTO client_uploads (clerk_user_id, r2_object_key, title, project_id)
+    VALUES (${userId}, ${objectKey}, ${title}, ${projectId})
+    RETURNING id, project_id
   `;
 
   // R2 is optional until the bucket/creds are configured — analysis +
@@ -61,5 +76,9 @@ export async function POST(request: Request) {
     uploadUrl = null;
   }
 
-  return NextResponse.json({ uploadId: row.id as string, uploadUrl });
+  return NextResponse.json({
+    uploadId: row.id as string,
+    projectId: (row.project_id as string | null) ?? null,
+    uploadUrl,
+  });
 }

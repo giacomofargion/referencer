@@ -8,6 +8,7 @@ import {
 } from "@/lib/cyanite";
 import { sql } from "@/lib/db";
 import { explainMatch } from "@/lib/explanations";
+import { isFeatureVector } from "@/lib/feature-vector";
 import { searchItunesSongs, type ItunesTrack } from "@/lib/itunes";
 import { rankBySonicSimilarity } from "@/lib/matching";
 import { resolveSpotifyTrackMeta } from "@/lib/spotify-oembed";
@@ -30,19 +31,6 @@ interface CachedReference {
   genre: string;
   preview_url: string;
   feature_vector: FeatureVector;
-}
-
-function isFeatureVector(value: unknown): value is FeatureVector {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.integratedLoudnessLufs === "number" &&
-    typeof v.loudnessRangeDb === "number" &&
-    typeof v.tempoBpm === "number" &&
-    typeof v.stereoWidth === "number" &&
-    Array.isArray(v.frequencyBandEnergies) &&
-    v.frequencyBandEnergies.length === 7
-  );
 }
 
 async function parseMatchRequest(request: Request): Promise<{
@@ -98,7 +86,7 @@ export async function POST(request: Request) {
   }
 
   const uploads = await sql`
-    SELECT id, title, feature_vector
+    SELECT id, title, feature_vector, project_id
     FROM client_uploads
     WHERE id = ${uploadId} AND clerk_user_id = ${userId}
     LIMIT 1
@@ -109,6 +97,7 @@ export async function POST(request: Request) {
 
   const upload = uploads[0];
   const title = (upload.title as string | null) ?? null;
+  const projectId = (upload.project_id as string | null) ?? null;
   const clientFeatures = upload.feature_vector as FeatureVector | null;
 
   if (!isFeatureVector(clientFeatures)) {
@@ -153,6 +142,21 @@ export async function POST(request: Request) {
     })),
   ).slice(0, TOP_RESULTS);
 
+  // One current result set per upload — rematch replaces prior rows.
+  await sql`DELETE FROM matches WHERE client_upload_id = ${uploadId}`;
+
+  let savedIds = new Set<string>();
+  if (projectId) {
+    const savedRows = await sql`
+      SELECT reference_track_id
+      FROM saved_references
+      WHERE project_id = ${projectId}
+    `;
+    savedIds = new Set(
+      savedRows.map((row) => row.reference_track_id as string),
+    );
+  }
+
   const matches = [];
   for (const hit of ranked) {
     const explanation = explainMatch(clientFeatures, hit.features);
@@ -178,12 +182,14 @@ export async function POST(request: Request) {
       distanceScore: hit.distance,
       explanation,
       featureVector: hit.features,
+      saved: savedIds.has(hit.item.id),
     });
   }
 
   return NextResponse.json({
     matches,
     clientFeatures,
+    projectId,
     discoveryNote: `Found ${pool.length} similar commercial tracks — ranked by your metering profile.`,
   });
 }

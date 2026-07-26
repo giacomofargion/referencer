@@ -1,8 +1,8 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { motion } from "motion/react";
 
-import { ABPlayer } from "@/components/ab-player";
 import { EqCurveGraph } from "@/components/eq-curve-graph";
 import {
   Card,
@@ -24,12 +24,14 @@ export interface MatchResult {
   distanceScore: number;
   explanation: string;
   featureVector: FeatureVector;
+  /** True when this ref is on the session's project shortlist. */
+  saved?: boolean;
 }
 
 interface MatchCardProps {
   match: MatchResult;
   clientFeatures: FeatureVector;
-  clientPlaybackUrl: string | null;
+  saveControl?: ReactNode;
 }
 
 function formatSigned(value: number, digits = 1, suffix = ""): string {
@@ -41,7 +43,7 @@ function formatSigned(value: number, digits = 1, suffix = ""): string {
 export function MatchCard({
   match,
   clientFeatures,
-  clientPlaybackUrl,
+  saveControl,
 }: MatchCardProps) {
   const deltas = computeFeatureDeltas(clientFeatures, match.featureVector);
 
@@ -54,6 +56,9 @@ export function MatchCard({
     >
       <Card className="border-border bg-surface-1">
         <CardContent className="flex flex-col gap-4">
+          {saveControl && (
+            <div className="flex justify-end">{saveControl}</div>
+          )}
           <p className="text-sm text-text-secondary">{match.explanation}</p>
 
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-text-muted sm:grid-cols-4">
@@ -88,10 +93,6 @@ export function MatchCard({
           <EqCurveGraph
             client={clientFeatures}
             reference={match.featureVector}
-          />
-          <ABPlayer
-            clientUrl={clientPlaybackUrl}
-            referenceUrl={match.previewUrl}
           />
         </CardContent>
       </Card>

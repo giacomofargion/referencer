@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
+import {
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { createPortal } from "react-dom";
@@ -22,6 +27,8 @@ import {
 import { easeOutSoft } from "@/lib/motion";
 import type { FeatureVector } from "@/lib/types";
 
+const subscribeNoop = () => () => {};
+
 interface ReferencesLightboxProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -33,6 +40,8 @@ interface ReferencesLightboxProps {
   weightPreset: WeightPreset;
   onWeightPresetChange: (preset: WeightPreset) => void;
   discoveryNote: string | null;
+  /** Optional save control for the active match (star → project shortlist). */
+  renderSaveControl?: (match: MatchResult) => ReactNode;
 }
 
 export function ReferencesLightbox({
@@ -46,12 +55,38 @@ export function ReferencesLightbox({
   weightPreset,
   onWeightPresetChange,
   discoveryNote,
+  renderSaveControl,
 }: ReferencesLightboxProps) {
+  // Portals never SSR, so the hydration render must also produce nothing —
+  // otherwise a lightbox that starts open (session reopen) fails hydration.
+  // useSyncExternalStore gives "false during SSR/hydration, true after".
+  const mounted = useSyncExternalStore(
+    subscribeNoop,
+    () => true,
+    () => false,
+  );
+
+  // Shared with carousel artwork + AB player.
+  const [playing, setPlaying] = useState(false);
+
+  function handleOpenChange(next: boolean) {
+    if (!next) setPlaying(false);
+    onOpenChange(next);
+  }
+
+  function handleActiveIndexChange(index: number) {
+    setPlaying(false);
+    onActiveIndexChange(index);
+  }
+
   useEffect(() => {
     if (!open) return;
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onOpenChange(false);
+      if (event.key === "Escape") {
+        setPlaying(false);
+        onOpenChange(false);
+      }
     }
 
     const previousOverflow = document.body.style.overflow;
@@ -64,7 +99,7 @@ export function ReferencesLightbox({
     };
   }, [open, onOpenChange]);
 
-  if (typeof document === "undefined") return null;
+  if (!mounted) return null;
 
   return createPortal(
     <AnimatePresence>
@@ -88,7 +123,7 @@ export function ReferencesLightbox({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.28, ease: easeOutSoft }}
-            onClick={() => onOpenChange(false)}
+            onClick={() => handleOpenChange(false)}
           />
 
           <motion.div
@@ -134,6 +169,7 @@ export function ReferencesLightbox({
                       value === "tone" ||
                       value === "loudness"
                     ) {
+                      setPlaying(false);
                       onWeightPresetChange(value);
                     }
                   }}
@@ -156,7 +192,7 @@ export function ReferencesLightbox({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  onClick={() => onOpenChange(false)}
+                  onClick={() => handleOpenChange(false)}
                   aria-label="Close"
                   className="bg-surface-0/50"
                 >
@@ -172,17 +208,25 @@ export function ReferencesLightbox({
                   analyzing again.
                 </p>
               ) : (
-                <div className="mx-auto flex max-w-4xl flex-col gap-8">
+                <div className="mx-auto flex max-w-4xl flex-col gap-5">
                   <MatchCarousel
                     matches={matches}
                     activeIndex={activeIndex}
-                    onActiveIndexChange={onActiveIndexChange}
+                    onActiveIndexChange={handleActiveIndexChange}
+                    playing={playing}
+                    onTogglePlay={() => setPlaying((prev) => !prev)}
+                    onPlayingChange={setPlaying}
+                    clientPlaybackUrl={clientPlaybackUrl}
                   />
                   {matches[activeIndex] && (
                     <MatchCard
                       match={matches[activeIndex]}
                       clientFeatures={clientFeatures}
-                      clientPlaybackUrl={clientPlaybackUrl}
+                      saveControl={
+                        renderSaveControl
+                          ? renderSaveControl(matches[activeIndex])
+                          : undefined
+                      }
                     />
                   )}
                 </div>
