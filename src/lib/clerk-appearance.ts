@@ -40,7 +40,9 @@ export const clerkAppearance = {
     fontSize: "0.875rem",
   },
   elements: {
-    rootBox: "font-sans",
+    // w-fit so page layouts with justify-center can actually center the card
+    // (Clerk's default rootBox stretches full width and leaves the card left-aligned).
+    rootBox: "mx-auto w-fit font-sans",
     card: "bg-surface-1 border border-border shadow-none",
     cardBox: "shadow-none",
     modalContent: "bg-surface-1 border border-border shadow-none",
