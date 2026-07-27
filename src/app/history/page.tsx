@@ -7,6 +7,7 @@ import { motion } from "motion/react";
 import { toast } from "sonner";
 
 import { AppHeader } from "@/components/app-header";
+import { PageShell } from "@/components/page-shell";
 import { formatSessionDate } from "@/lib/format";
 import { fadeInUp, staggerChildren } from "@/lib/motion";
 
@@ -48,9 +49,9 @@ export default function HistoryPage() {
   return (
     <>
       <AppHeader />
-      <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col gap-16 px-6 py-16">
+      <PageShell>
         <motion.div
-          className="flex flex-col gap-4"
+          className="flex flex-col gap-3"
           variants={fadeInUp}
           initial="hidden"
           animate="visible"
@@ -58,7 +59,7 @@ export default function HistoryPage() {
           <h1 className="text-3xl font-semibold tracking-tight text-text-primary">
             History
           </h1>
-          <p className="max-w-md text-sm mb-5 leading-relaxed text-text-secondary">
+          <p className="max-w-md text-sm leading-relaxed text-text-secondary">
             Past match sessions — reopen to review references and save keepers
             to a project.
           </p>
@@ -86,7 +87,7 @@ export default function HistoryPage() {
           </motion.div>
         ) : (
           <motion.ul
-            className="flex flex-col gap-4"
+            className="flex flex-col gap-3"
             variants={staggerChildren}
             initial="hidden"
             animate="visible"
@@ -99,10 +100,10 @@ export default function HistoryPage() {
                       ? `/sessions/${session.id}?from=${encodeURIComponent(`/projects/${session.projectId}`)}`
                       : `/sessions/${session.id}?from=${encodeURIComponent("/history")}`
                   }
-                  className="group flex items-center gap-6 rounded-xl border border-border bg-surface-1 px-5 py-6 transition-colors hover:border-text-muted hover:bg-surface-2"
+                  className="group list-row-hover flex items-center gap-4 rounded-xl border border-border bg-surface-1 px-5 py-5"
                 >
-                  <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                    <span className="truncate text-lg font-medium tracking-tight text-text-primary transition-colors group-hover:text-client">
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <span className="truncate text-base font-medium tracking-tight text-text-primary transition-colors group-hover:text-client">
                       {session.title}
                     </span>
                     <span className="text-sm text-text-muted">
@@ -118,19 +119,16 @@ export default function HistoryPage() {
                     {session.matchCount === 1 ? "" : "s"}
                   </span>
 
-                  <div className="flex shrink-0 items-center gap-2 text-text-secondary">
-                    <span className="hidden text-sm sm:inline">View</span>
-                    <ChevronRightIcon
-                      className="size-4 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-client"
-                      aria-hidden
-                    />
-                  </div>
+                  <ChevronRightIcon
+                    className="size-4 shrink-0 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-client"
+                    aria-hidden
+                  />
                 </Link>
               </motion.li>
             ))}
           </motion.ul>
         )}
-      </main>
+      </PageShell>
     </>
   );
 }

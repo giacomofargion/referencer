@@ -3,6 +3,8 @@
 @import "shadcn/tailwind.css";
 @import "@clerk/ui/themes/shadcn.css";
 
+@layer clerk;
+
 @custom-variant dark (&:is(.dark *));
 
 /*
@@ -13,27 +15,27 @@
 */
 
 :root {
-  /* Surfaces — 3-step elevation ladder (lighter = raised) */
-  --surface-0: oklch(0.13 0.012 250);
-  --surface-1: oklch(0.2 0.012 250);
-  --surface-2: oklch(0.26 0.014 250);
+  /* Surfaces — Resend-like depth: near-black base, tight elevation steps */
+  --surface-0: oklch(0.09 0.008 250);
+  --surface-1: oklch(0.13 0.009 250);
+  --surface-2: oklch(0.17 0.01 250);
 
-  /* Text — three steps only */
-  --text-primary: oklch(0.95 0.005 250);
-  --text-secondary: oklch(0.72 0.01 250);
-  --text-muted: oklch(0.55 0.01 250);
+  /* Text — crisp primary, softer secondary/muted ladder */
+  --text-primary: oklch(0.97 0.003 250);
+  --text-secondary: oklch(0.68 0.008 250);
+  --text-muted: oklch(0.48 0.008 250);
 
-  /* Client track / meter glow (accent) */
-  --client: oklch(0.82 0.15 175);
-  --client-muted: oklch(0.82 0.15 175 / 0.16);
-  --client-foreground: oklch(0.16 0.02 175);
+  /* Client track / meter glow (accent) — slightly richer teal */
+  --client: oklch(0.79 0.17 175);
+  --client-muted: oklch(0.79 0.17 175 / 0.12);
+  --client-foreground: oklch(0.14 0.03 175);
 
   /* Reference track — warm amber, comparison color only */
-  --reference: oklch(0.8 0.14 70);
-  --reference-muted: oklch(0.8 0.14 70 / 0.16);
+  --reference: oklch(0.78 0.15 70);
+  --reference-muted: oklch(0.78 0.15 70 / 0.12);
 
   --destructive: oklch(0.65 0.2 25);
-  --border: oklch(1 0 0 / 10%);
+  --border: oklch(1 0 0 / 7%);
 
   /* Radii — only two intentional sizes (sm + lg); md bridges shadcn */
   --radius: 0.5rem;
@@ -53,14 +55,14 @@
   --muted-foreground: var(--text-muted);
   --accent: var(--surface-2);
   --accent-foreground: var(--text-primary);
-  --input: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 9%);
   --ring: var(--client);
 
   --chart-1: var(--client);
   --chart-2: var(--reference);
-  --chart-3: oklch(0.7 0.08 250);
-  --chart-4: oklch(0.55 0.06 250);
-  --chart-5: oklch(0.4 0.04 250);
+  --chart-3: oklch(0.62 0.07 250);
+  --chart-4: oklch(0.48 0.05 250);
+  --chart-5: oklch(0.34 0.03 250);
 
   --sidebar: var(--surface-1);
   --sidebar-foreground: var(--text-primary);
@@ -140,29 +142,29 @@
   Kept here so components never need arbitrary values.
 */
 
-/* Soft radial accent glow, meant for a thin full-width layer at the top of a section */
+/* Soft radial accent glow — wide, low-opacity bloom like Resend hero lighting */
 @utility hero-glow {
   background: radial-gradient(
-    80% 100% at 50% -10%,
-    color-mix(in oklch, var(--client), transparent 72%),
-    transparent 72%
+    90% 120% at 50% -20%,
+    color-mix(in oklch, var(--client), transparent 84%),
+    transparent 65%
   );
 }
 
 /* Faint square grid that fades out toward the bottom */
 @utility grid-texture {
   background-image:
-    linear-gradient(to right, oklch(1 0 0 / 5%) 1px, transparent 1px),
-    linear-gradient(to bottom, oklch(1 0 0 / 5%) 1px, transparent 1px);
-  background-size: 72px 72px;
-  mask-image: linear-gradient(to bottom, black 30%, transparent);
+    linear-gradient(to right, oklch(1 0 0 / 3.5%) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(1 0 0 / 3.5%) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: linear-gradient(to bottom, black 25%, transparent);
 }
 
-/* Glossy card: top-edge shine line + faint top-down sheen + accent bloom */
+/* Glossy card: hairline top shine + faint sheen + distant accent bloom */
 @utility card-glossy {
   position: relative;
-  background-image: linear-gradient(to bottom, oklch(1 0 0 / 6%), transparent 45%);
-  box-shadow: 0 0 64px -12px color-mix(in oklch, var(--client), transparent 75%);
+  background-image: linear-gradient(to bottom, oklch(1 0 0 / 4%), transparent 40%);
+  box-shadow: 0 0 80px -20px color-mix(in oklch, var(--client), transparent 88%);
 
   &::before {
     content: "";
@@ -174,7 +176,7 @@
     background: linear-gradient(
       90deg,
       transparent,
-      color-mix(in oklch, var(--client), transparent 25%),
+      color-mix(in oklch, var(--client), transparent 40%),
       transparent
     );
   }
@@ -196,7 +198,93 @@
 
 /* Accent bloom for primary actions */
 @utility glow-client {
-  box-shadow: 0 0 24px -8px color-mix(in oklch, var(--client), transparent 40%);
+  box-shadow: 0 0 32px -12px color-mix(in oklch, var(--client), transparent 55%);
+}
+
+/*
+  Primary CTA — soft top light + hairline edge instead of a flat teal slab.
+  Hover lifts with a quiet bloom rather than dumping opacity.
+*/
+@utility btn-primary {
+  color: var(--client-foreground);
+  border-color: color-mix(in oklch, var(--client), white 16%);
+  background-color: var(--client);
+  background-image: linear-gradient(
+    to bottom,
+    color-mix(in oklch, var(--client), white 14%),
+    var(--client) 48%,
+    color-mix(in oklch, var(--client), black 10%)
+  );
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 20%),
+    0 1px 2px oklch(0 0 0 / 28%);
+  transition:
+    filter 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.35s ease;
+
+  &:hover {
+    filter: brightness(1.05);
+    border-color: color-mix(in oklch, var(--client), white 28%);
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 26%),
+      0 1px 2px oklch(0 0 0 / 28%),
+      0 0 28px -12px color-mix(in oklch, var(--client), transparent 50%);
+  }
+
+  &:active {
+    filter: brightness(0.96);
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 12%),
+      0 0 0 transparent;
+  }
+}
+
+/*
+  List row hover — directional wash from the leading edge.
+  Uses a light lift + soft teal tip so it reads on near-black surfaces
+  (surface-1→2 alone is too close to notice).
+*/
+@utility list-row-hover {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transition: border-color 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: linear-gradient(
+      100deg,
+      oklch(1 0 0 / 9%) 0%,
+      oklch(1 0 0 / 4%) 38%,
+      color-mix(in oklch, var(--client), transparent 90%) 68%,
+      transparent 100%
+    );
+    transform: scaleX(0);
+    transform-origin: left center;
+    opacity: 0;
+    transition:
+      transform 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 0.35s ease;
+  }
+
+  &:hover {
+    border-color: color-mix(in oklch, var(--client), transparent 50%);
+  }
+
+  &:hover::before {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+
+  & > * {
+    position: relative;
+    z-index: 1;
+  }
 }
 
 @layer base {

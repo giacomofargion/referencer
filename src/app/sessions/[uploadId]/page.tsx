@@ -3,6 +3,7 @@ import { auth } from "@clerk/nextjs/server";
 import { notFound, redirect } from "next/navigation";
 
 import { AppHeader } from "@/components/app-header";
+import { PageShell } from "@/components/page-shell";
 import { SessionResults } from "@/components/session-results";
 import { sql } from "@/lib/db";
 import { isFeatureVector } from "@/lib/feature-vector";
@@ -91,7 +92,7 @@ export default async function SessionPage({ params }: PageProps) {
   return (
     <>
       <AppHeader />
-      <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col px-6 py-12">
+      <PageShell>
         <Suspense
           fallback={
             <p className="text-sm text-text-muted">Loading session…</p>
@@ -111,7 +112,7 @@ export default async function SessionPage({ params }: PageProps) {
             }
           />
         </Suspense>
-      </main>
+      </PageShell>
     </>
   );
 }

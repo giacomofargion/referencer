@@ -1,8 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { notFound, redirect } from "next/navigation";
 
-import { AppHeader } from "@/components/app-header";
 import { ProjectDetail } from "@/app/projects/[id]/project-detail";
+import { AppHeader } from "@/components/app-header";
+import { PageShell } from "@/components/page-shell";
 import { sql } from "@/lib/db";
 
 type PageProps = { params: Promise<{ id: string }> };
@@ -56,7 +57,7 @@ export default async function ProjectPage({ params }: PageProps) {
   return (
     <>
       <AppHeader />
-      <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col px-6 py-12">
+      <PageShell>
         <ProjectDetail
           projectId={project.id as string}
           initialName={project.name as string}
@@ -77,7 +78,7 @@ export default async function ProjectPage({ params }: PageProps) {
             previewUrl: row.preview_url as string,
           }))}
         />
-      </main>
+      </PageShell>
     </>
   );
 }

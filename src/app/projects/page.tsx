@@ -7,6 +7,7 @@ import { motion } from "motion/react";
 import { toast } from "sonner";
 
 import { AppHeader } from "@/components/app-header";
+import { PageShell } from "@/components/page-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatSessionDate } from "@/lib/format";
@@ -87,9 +88,9 @@ export default function ProjectsPage() {
   return (
     <>
       <AppHeader />
-      <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col gap-16 px-6 py-16">
+      <PageShell>
         <motion.div
-          className="flex flex-col gap-4"
+          className="flex flex-col gap-3"
           variants={fadeInUp}
           initial="hidden"
           animate="visible"
@@ -97,7 +98,9 @@ export default function ProjectsPage() {
           <h1 className="text-3xl font-semibold tracking-tight text-text-primary">
             Projects
           </h1>
-
+          <p className="max-w-md text-sm leading-relaxed text-text-secondary">
+            Group sessions and shortlisted references by client or release.
+          </p>
         </motion.div>
 
         <motion.form
@@ -106,9 +109,9 @@ export default function ProjectsPage() {
           initial="hidden"
           animate="visible"
           transition={{ delay: 0.05 }}
-          className="flex flex-col gap-6 rounded-xl border border-border bg-surface-1 px-6 py-7"
+          className="flex flex-col gap-5 rounded-xl border border-border bg-surface-1 px-5 py-6"
         >
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1.5">
             <h2 className="text-base font-medium text-text-primary">
               New project
             </h2>
@@ -137,7 +140,7 @@ export default function ProjectsPage() {
           </div>
         </motion.form>
 
-        <section className="flex flex-col gap-6">
+        <section className="flex flex-col gap-4">
           <motion.div
             className="flex items-baseline justify-between gap-4"
             variants={fadeInUp}
@@ -145,7 +148,7 @@ export default function ProjectsPage() {
             animate="visible"
             transition={{ delay: 0.1 }}
           >
-            <h2 className="text-base mt-5 font-medium text-text-primary">
+            <h2 className="text-base font-medium text-text-primary">
               Your projects
             </h2>
             {projects && projects.length > 0 ? (
@@ -171,7 +174,7 @@ export default function ProjectsPage() {
             </motion.div>
           ) : (
             <motion.ul
-              className="flex flex-col gap-4"
+              className="flex flex-col gap-3"
               variants={staggerChildren}
               initial="hidden"
               animate="visible"
@@ -180,10 +183,10 @@ export default function ProjectsPage() {
                 <motion.li key={project.id} variants={fadeInUp}>
                   <Link
                     href={`/projects/${project.id}`}
-                    className="group flex items-center gap-6 rounded-xl border border-border bg-surface-1 px-5 py-6 transition-colors hover:border-text-muted hover:bg-surface-2"
+                    className="group list-row-hover flex items-center gap-4 rounded-xl border border-border bg-surface-1 px-5 py-5"
                   >
-                    <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                      <span className="truncate text-lg font-medium tracking-tight text-text-primary transition-colors group-hover:text-client">
+                    <div className="flex min-w-0 flex-1 flex-col gap-1">
+                      <span className="truncate text-base font-medium tracking-tight text-text-primary transition-colors group-hover:text-client">
                         {project.name}
                       </span>
                       <span className="text-sm text-text-muted">
@@ -201,20 +204,17 @@ export default function ProjectsPage() {
                       </span>
                     </div>
 
-                    <div className="flex shrink-0 items-center gap-2 text-text-secondary">
-                      <span className="hidden text-sm sm:inline">Open</span>
-                      <ChevronRightIcon
-                        className="size-4 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-client"
-                        aria-hidden
-                      />
-                    </div>
+                    <ChevronRightIcon
+                      className="size-4 shrink-0 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-client"
+                      aria-hidden
+                    />
                   </Link>
                 </motion.li>
               ))}
             </motion.ul>
           )}
         </section>
-      </main>
+      </PageShell>
     </>
   );
 }

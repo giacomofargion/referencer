@@ -1,14 +1,10 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import {
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  PauseIcon,
-  PlayIcon,
-} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import {
   animate,
+  AnimatePresence,
   motion,
   useMotionValue,
   type PanInfo,
@@ -20,11 +16,13 @@ import { Button } from "@/components/ui/button";
 import { fadeInUp } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
-const CARD_SIZE = 200;
-const CARD_GAP = 28;
-const STEP = CARD_SIZE + CARD_GAP;
-/** How far the active card lifts above its inactive neighbors. */
-const ACTIVE_LIFT = 28;
+const CARD_SIZE_MAX = 280;
+const CARD_SIZE_MIN = 168;
+/** Side inset so peek of neighbors + chevrons fit on narrow screens. */
+const CARD_SIDE_INSET = 56;
+const CARD_GAP = 24;
+const ACTIVE_LIFT_DESKTOP = 24;
+const ACTIVE_LIFT_MOBILE = 12;
 const DRAG_THRESHOLD = 48;
 const VELOCITY_THRESHOLD = 400;
 
@@ -44,6 +42,21 @@ export function enlargeArtworkUrl(url: string | null, size = 600): string | null
   return url.replace(/\d+x\d+bb/, `${size}x${size}bb`);
 }
 
+function cardMetrics(containerWidth: number) {
+  const cardSize = Math.min(
+    CARD_SIZE_MAX,
+    Math.max(CARD_SIZE_MIN, containerWidth - CARD_SIDE_INSET * 2),
+  );
+  const compact = containerWidth < 480;
+  return {
+    cardSize,
+    cardGap: CARD_GAP,
+    step: cardSize + CARD_GAP,
+    activeLift: compact ? ACTIVE_LIFT_MOBILE : ACTIVE_LIFT_DESKTOP,
+    compact,
+  };
+}
+
 export function MatchCarousel({
   matches,
   activeIndex,
@@ -55,15 +68,37 @@ export function MatchCarousel({
 }: MatchCarouselProps) {
   const trackX = useMotionValue(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [metrics, setMetrics] = useState(() => cardMetrics(360));
   const active = matches[activeIndex];
+  const { cardSize, cardGap, step, activeLift, compact } = metrics;
 
-  // Center the active card in the viewport
+  // Keep artwork size + track offset in sync with the listening column width.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    function sync() {
+      const width = containerRef.current?.clientWidth ?? 360;
+      const next = cardMetrics(width);
+      setMetrics(next);
+
+      const centerOffset =
+        width / 2 - next.cardSize / 2 - activeIndex * next.step;
+      trackX.set(centerOffset);
+    }
+
+    sync();
+    const observer = new ResizeObserver(sync);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [activeIndex, trackX]);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container || matches.length === 0) return;
 
     const centerOffset =
-      container.clientWidth / 2 - CARD_SIZE / 2 - activeIndex * STEP;
+      container.clientWidth / 2 - cardSize / 2 - activeIndex * step;
 
     animate(trackX, centerOffset, {
       type: "spring",
@@ -71,21 +106,7 @@ export function MatchCarousel({
       damping: 32,
       mass: 0.85,
     });
-  }, [activeIndex, matches.length, trackX]);
-
-  // Recenter on resize
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const observer = new ResizeObserver(() => {
-      const centerOffset =
-        container.clientWidth / 2 - CARD_SIZE / 2 - activeIndex * STEP;
-      trackX.set(centerOffset);
-    });
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, [activeIndex, trackX]);
+  }, [activeIndex, matches.length, trackX, cardSize, step]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -111,11 +132,10 @@ export function MatchCarousel({
     }
     onActiveIndexChange(next);
 
-    // Snap back to the (possibly new) center even if index didn't change
     const container = containerRef.current;
     if (container) {
       const centerOffset =
-        container.clientWidth / 2 - CARD_SIZE / 2 - next * STEP;
+        container.clientWidth / 2 - cardSize / 2 - next * step;
       animate(trackX, centerOffset, {
         type: "spring",
         stiffness: 280,
@@ -128,20 +148,19 @@ export function MatchCarousel({
   if (matches.length === 0 || !active) return null;
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-4 sm:gap-6">
       <div className="relative">
         <div
           ref={containerRef}
           className="overflow-hidden"
-          // Extra top/bottom room so the lifted active card isn't clipped
-          style={{ paddingTop: ACTIVE_LIFT + 8, paddingBottom: 8 }}
+          style={{ paddingTop: activeLift + 8, paddingBottom: 8 }}
         >
           <motion.div
             className="flex cursor-grab items-end active:cursor-grabbing"
             style={{
               x: trackX,
-              gap: CARD_GAP,
-              width: matches.length * STEP,
+              gap: cardGap,
+              width: matches.length * step,
             }}
             drag="x"
             dragConstraints={{ left: -Infinity, right: Infinity }}
@@ -157,7 +176,6 @@ export function MatchCarousel({
                   key={match.id}
                   type="button"
                   onClick={() => {
-                    // Active artwork toggles preview; others just focus.
                     if (isActive) onTogglePlay();
                     else onActiveIndexChange(index);
                   }}
@@ -170,15 +188,15 @@ export function MatchCarousel({
                   }
                   aria-current={isActive ? "true" : undefined}
                   className={cn(
-                    "group relative shrink-0 overflow-hidden rounded-2xl outline-none",
+                    "group relative shrink-0 overflow-hidden rounded-xl outline-none sm:rounded-2xl",
                     "focus-visible:ring-2 focus-visible:ring-client",
                     isActive && "card-glossy",
                   )}
-                  style={{ width: CARD_SIZE, height: CARD_SIZE }}
+                  style={{ width: cardSize, height: cardSize }}
                   animate={{
-                    y: isActive ? -ACTIVE_LIFT : 0,
-                    scale: isActive ? 1.06 : 0.92,
-                    opacity: isActive ? 1 : 0.55,
+                    y: isActive ? -activeLift : 0,
+                    scale: isActive ? 1.04 : 0.9,
+                    opacity: isActive ? 1 : 0.5,
                   }}
                   transition={{ type: "spring", stiffness: 320, damping: 30 }}
                 >
@@ -194,28 +212,9 @@ export function MatchCarousel({
                     <div className="size-full bg-surface-2" />
                   )}
 
-                  {isActive && (
-                    <span
-                      className={cn(
-                        "pointer-events-none absolute inset-0 flex items-center justify-center bg-surface-0/35 transition-opacity",
-                        playing
-                          ? "opacity-100"
-                          : "opacity-80 group-hover:opacity-100",
-                      )}
-                    >
-                      <span className="flex size-14 items-center justify-center rounded-full bg-surface-0/85 text-text-primary shadow-lg ring-1 ring-border">
-                        {playing ? (
-                          <PauseIcon className="size-6" />
-                        ) : (
-                          <PlayIcon className="size-6 translate-x-0.5" />
-                        )}
-                      </span>
-                    </span>
-                  )}
-
                   <span
                     className={cn(
-                      "absolute top-3 right-3 rounded-full px-2 py-0.5 font-mono text-[10px] backdrop-blur-sm",
+                      "absolute top-2 right-2 rounded-full px-2 py-0.5 font-mono text-[10px] backdrop-blur-sm sm:top-3 sm:right-3",
                       isActive
                         ? "bg-surface-0/70 text-text-primary"
                         : "bg-surface-0/50 text-text-muted",
@@ -238,7 +237,7 @@ export function MatchCarousel({
               disabled={activeIndex === 0}
               onClick={() => onActiveIndexChange(activeIndex - 1)}
               aria-label="Previous reference"
-              className="absolute top-1/2 left-0 z-10 -translate-y-1/2 bg-surface-0/60 backdrop-blur-sm disabled:opacity-30"
+              className="absolute top-1/2 left-0 z-10 hidden -translate-y-1/2 bg-surface-0/60 backdrop-blur-sm disabled:opacity-30 sm:inline-flex"
             >
               <ChevronLeftIcon className="size-5" />
             </Button>
@@ -249,41 +248,67 @@ export function MatchCarousel({
               disabled={activeIndex === matches.length - 1}
               onClick={() => onActiveIndexChange(activeIndex + 1)}
               aria-label="Next reference"
-              className="absolute top-1/2 right-0 z-10 -translate-y-1/2 bg-surface-0/60 backdrop-blur-sm disabled:opacity-30"
+              className="absolute top-1/2 right-0 z-10 hidden -translate-y-1/2 bg-surface-0/60 backdrop-blur-sm disabled:opacity-30 sm:inline-flex"
             >
               <ChevronRightIcon className="size-5" />
             </Button>
+
+            {/* Dot strip on phones — swipe is primary; arrows clutter the art. */}
+            <div
+              className="mt-1 flex justify-center gap-1.5 sm:hidden"
+              aria-hidden
+            >
+              {matches.map((match, index) => (
+                <button
+                  key={`dot-${match.id}`}
+                  type="button"
+                  onClick={() => onActiveIndexChange(index)}
+                  aria-label={`Reference ${index + 1}`}
+                  className={cn(
+                    "size-1.5 rounded-full transition-colors",
+                    index === activeIndex ? "bg-client" : "bg-surface-2",
+                  )}
+                />
+              ))}
+            </div>
           </>
         )}
       </div>
 
-      <div className="flex flex-col items-center gap-3">
-        <ABPlayer
-          clientUrl={clientPlaybackUrl}
-          referenceUrl={active.previewUrl}
-          playing={playing}
-          onPlayingChange={onPlayingChange}
-          layout="inline"
-        />
+      <div className="flex flex-col items-center gap-4 sm:gap-5">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={`meta-${active.id}`}
+            variants={fadeInUp}
+            initial="hidden"
+            animate="visible"
+            exit="hidden"
+            className="flex max-w-full flex-col items-center gap-1 px-1 text-center"
+          >
+            <h3 className="text-lg font-semibold tracking-tight text-text-primary sm:text-2xl">
+              {active.title}
+            </h3>
+            <p className="line-clamp-2 text-sm text-text-secondary">
+              {active.artist}
+              {active.album ? ` · ${active.album}` : ""}
+            </p>
+            <p className="font-mono text-xs text-text-muted">
+              {active.genre} · score {active.distanceScore.toFixed(2)}
+            </p>
+          </motion.div>
+        </AnimatePresence>
 
-        <motion.div
-          key={active.id}
-          variants={fadeInUp}
-          initial="hidden"
-          animate="visible"
-          className="flex flex-col items-center gap-1 text-center"
-        >
-          <h3 className="text-xl font-semibold tracking-tight text-text-primary">
-            {active.title}
-          </h3>
-          <p className="text-sm text-text-secondary">
-            {active.artist}
-            {active.album ? ` · ${active.album}` : ""}
-          </p>
-          <p className="font-mono text-xs text-text-muted">
-            {active.genre} · score {active.distanceScore.toFixed(2)}
-          </p>
-        </motion.div>
+        <div className="w-full max-w-sm px-1">
+          <ABPlayer
+            key={`player-${active.id}`}
+            clientUrl={clientPlaybackUrl}
+            referenceUrl={active.previewUrl}
+            playing={playing}
+            onPlayingChange={onPlayingChange}
+            layout={compact ? "compact" : "full"}
+            enableHotkeys
+          />
+        </div>
       </div>
     </div>
   );

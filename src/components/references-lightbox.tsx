@@ -106,7 +106,7 @@ export function ReferencesLightbox({
       {open && (
         <motion.div
           key="references-lightbox"
-          className="fixed inset-0 z-50 flex items-stretch justify-center p-3 sm:p-5 md:p-8"
+          className="fixed inset-0 z-50 flex items-stretch justify-center p-0 sm:p-5 md:p-8"
           role="dialog"
           aria-modal="true"
           aria-labelledby="references-lightbox-title"
@@ -127,7 +127,7 @@ export function ReferencesLightbox({
           />
 
           <motion.div
-            className="relative z-10 flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-surface-1 ring-1 ring-border"
+            className="relative z-10 flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-none bg-surface-1 ring-1 ring-border sm:rounded-2xl"
             initial={{ opacity: 0, scale: 0.94, y: 28 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 16 }}
@@ -145,22 +145,22 @@ export function ReferencesLightbox({
               <div className="hero-glow absolute inset-0 opacity-60" />
             </div>
 
-            <header className="relative flex shrink-0 items-start justify-between gap-4 border-b border-border px-5 py-4 sm:px-8 sm:py-5">
-              <div className="flex min-w-0 flex-col gap-1">
+            <header className="relative flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 sm:items-start sm:gap-4 sm:px-8 sm:py-5">
+              <div className="flex min-w-0 flex-col gap-0.5 sm:gap-1">
                 <h2
                   id="references-lightbox-title"
-                  className="text-xl font-semibold tracking-tight text-text-primary sm:text-2xl"
+                  className="truncate text-lg font-semibold tracking-tight text-text-primary sm:text-2xl"
                 >
                   Reference matches
                 </h2>
                 {discoveryNote && (
-                  <p className="max-w-2xl text-sm text-text-muted">
+                  <p className="line-clamp-2 max-w-2xl text-xs text-text-muted sm:text-sm">
                     {discoveryNote}
                   </p>
                 )}
               </div>
 
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
                 <Select
                   value={weightPreset}
                   onValueChange={(value) => {
@@ -174,7 +174,7 @@ export function ReferencesLightbox({
                     }
                   }}
                 >
-                  <SelectTrigger className="w-40 sm:w-44">
+                  <SelectTrigger className="h-9 w-[7.5rem] sm:h-9 sm:w-44">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -201,14 +201,15 @@ export function ReferencesLightbox({
               </div>
             </header>
 
-            <div className="relative flex-1 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8">
+            <div className="relative flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-8 sm:py-8">
               {matches.length === 0 ? (
                 <p className="text-sm text-text-secondary">
                   No matches this run — similarity results vary, so try
                   analyzing again.
                 </p>
               ) : (
-                <div className="mx-auto flex max-w-4xl flex-col gap-5">
+                // Mobile: single listening-first column. Desktop: player | metering.
+                <div className="mx-auto flex max-w-5xl flex-col gap-6 sm:gap-8 lg:grid lg:grid-cols-2 lg:items-start lg:gap-10">
                   <MatchCarousel
                     matches={matches}
                     activeIndex={activeIndex}

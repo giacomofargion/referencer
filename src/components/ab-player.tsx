@@ -5,6 +5,8 @@ import { PauseIcon, PlayIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
+export type ABSource = "client" | "reference";
+
 interface ABPlayerProps {
   clientUrl: string | null;
   referenceUrl: string;
@@ -12,28 +14,44 @@ interface ABPlayerProps {
   playing: boolean;
   onPlayingChange: (playing: boolean) => void;
   /**
-   * `inline` — circular A/B under artwork (lightbox).
-   * `bar` — compact labeled row (fallback / other surfaces).
+   * `full` — scrubber + primary play + A/B segment (lightbox).
+   * `compact` — same controls, tighter for list rows (project shortlist).
    */
-  layout?: "inline" | "bar";
+  layout?: "full" | "compact";
+  /** Space / A·B / 1·2 hotkeys when the listening surface is focused. */
+  enableHotkeys?: boolean;
 }
 
-type Source = "client" | "reference";
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
 
 /**
  * Instant A/B switch between client and reference. Both elements stay
  * loaded; we mute/unmute and sync currentTime so the cut feels seamless.
+ *
+ * Layout follows studio now-playing norms: scrubber first, one primary
+ * play control, then a clear teal/amber A/B segment.
  */
 export function ABPlayer({
   clientUrl,
   referenceUrl,
   playing,
   onPlayingChange,
-  layout = "inline",
+  layout = "full",
+  enableHotkeys = false,
 }: ABPlayerProps) {
   const clientRef = useRef<HTMLAudioElement>(null);
   const referenceRef = useRef<HTMLAudioElement>(null);
-  const [source, setSource] = useState<Source>("reference");
+  const [source, setSource] = useState<ABSource>("reference");
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const scrubbingRef = useRef(false);
+
+  const canClient = Boolean(clientUrl);
 
   useEffect(() => {
     const client = clientRef.current;
@@ -43,16 +61,6 @@ export function ABPlayer({
     if (client) client.muted = source !== "client";
     reference.muted = source !== "reference";
   }, [source]);
-
-  // New track — reset transport; parent also clears `playing` on index change.
-  useEffect(() => {
-    const client = clientRef.current;
-    const reference = referenceRef.current;
-    client?.pause();
-    reference?.pause();
-    if (client) client.currentTime = 0;
-    if (reference) reference.currentTime = 0;
-  }, [referenceUrl, clientUrl]);
 
   useEffect(() => {
     const client = clientRef.current;
@@ -77,28 +85,119 @@ export function ABPlayer({
     }
   }, [playing, clientUrl, referenceUrl, onPlayingChange]);
 
-  function activate(next: Source) {
-    if (next === "client" && !clientUrl) return;
+  // Drive scrubber from the audible element (both stay in sync on seek).
+  useEffect(() => {
+    const reference = referenceRef.current;
+    if (!reference) return;
 
-    if (source === next && playing) {
-      onPlayingChange(false);
-      return;
+    function syncFromAudio() {
+      if (scrubbingRef.current) return;
+      const audio = referenceRef.current;
+      if (!audio) return;
+      setCurrentTime(audio.currentTime);
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setDuration(audio.duration);
+      }
     }
+
+    function onLoadedMetadata() {
+      const audio = referenceRef.current;
+      if (!audio) return;
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setDuration(audio.duration);
+      }
+    }
+
+    reference.addEventListener("timeupdate", syncFromAudio);
+    reference.addEventListener("loadedmetadata", onLoadedMetadata);
+    onLoadedMetadata();
+
+    return () => {
+      reference.removeEventListener("timeupdate", syncFromAudio);
+      reference.removeEventListener("loadedmetadata", onLoadedMetadata);
+    };
+  }, [referenceUrl]);
+
+  useEffect(() => {
+    if (!enableHotkeys) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (event.key === " " || event.code === "Space") {
+        event.preventDefault();
+        onPlayingChange(!playing);
+        return;
+      }
+
+      if (event.key === "a" || event.key === "A" || event.key === "1") {
+        if (!canClient) return;
+        event.preventDefault();
+        setSource("client");
+        if (!playing) onPlayingChange(true);
+        return;
+      }
+
+      if (event.key === "b" || event.key === "B" || event.key === "2") {
+        event.preventDefault();
+        setSource("reference");
+        if (!playing) onPlayingChange(true);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [enableHotkeys, playing, onPlayingChange, canClient]);
+
+  function seekTo(next: number) {
+    const client = clientRef.current;
+    const reference = referenceRef.current;
+    if (!reference) return;
+    const clamped = Math.max(0, Math.min(next, duration || next));
+    reference.currentTime = clamped;
+    if (client) client.currentTime = clamped;
+    setCurrentTime(clamped);
+  }
+
+  function setSourceAndMaybePlay(next: ABSource) {
+    if (next === "client" && !canClient) return;
 
     const client = clientRef.current;
     const reference = referenceRef.current;
     if (!reference) return;
 
     const t =
-      source === "reference" ? reference.currentTime : (client?.currentTime ?? 0);
+      source === "reference"
+        ? reference.currentTime
+        : (client?.currentTime ?? 0);
     if (client) client.currentTime = t;
     reference.currentTime = t;
     setSource(next);
-    onPlayingChange(true);
+    if (!playing) onPlayingChange(true);
   }
 
+  const listeningLabel =
+    source === "client" ? "Your track" : "Reference";
+  const isCompact = layout === "compact";
+  const max = duration > 0 ? duration : 0;
+
   return (
-    <div className="flex flex-col items-center gap-2">
+    <div
+      className={cn(
+        "flex w-full flex-col",
+        isCompact ? "max-w-none gap-3" : "max-w-sm gap-4",
+        !isCompact && "mx-auto items-stretch",
+      )}
+    >
       {clientUrl && (
         <audio
           ref={clientRef}
@@ -116,121 +215,144 @@ export function ABPlayer({
         onEnded={() => onPlayingChange(false)}
       />
 
-      {layout === "inline" ? (
-        <div className="flex items-end gap-4">
-          <TransportButton
-            label="Your track"
-            accent="client"
-            disabled={!clientUrl}
-            active={source === "client"}
-            playing={playing && source === "client"}
-            onClick={() => activate("client")}
-            title={
-              clientUrl
-                ? "Play your uploaded track"
-                : "Client audio unavailable for this session"
-            }
-          />
-          <TransportButton
-            label="Reference"
-            accent="reference"
-            disabled={false}
-            active={source === "reference"}
-            playing={playing && source === "reference"}
-            onClick={() => activate("reference")}
-            title="Play reference preview"
-            size="lg"
-          />
-        </div>
-      ) : (
-        <div className="flex items-center gap-2">
-          <TransportButton
-            label="Your track"
-            accent="client"
-            disabled={!clientUrl}
-            active={source === "client"}
-            playing={playing && source === "client"}
-            onClick={() => activate("client")}
-            title={
-              clientUrl
-                ? "Play your uploaded track"
-                : "Client audio unavailable for this session"
-            }
-          />
-          <TransportButton
-            label="Reference"
-            accent="reference"
-            disabled={false}
-            active={source === "reference"}
-            playing={playing && source === "reference"}
-            onClick={() => activate("reference")}
-            title="Play reference preview"
-          />
-        </div>
-      )}
+      {canClient ? (
+        <p
+          className={cn(
+            "text-center text-xs",
+            source === "client" ? "text-client" : "text-reference",
+          )}
+          aria-live="polite"
+        >
+          Listening to{" "}
+          <span className="font-medium text-text-primary">
+            {listeningLabel}
+          </span>
+        </p>
+      ) : null}
+
+      <div className="flex items-center gap-2.5">
+        <span className="w-9 shrink-0 text-right font-mono text-[11px] text-text-muted tabular-nums">
+          {formatTime(currentTime)}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={max || 1}
+          step={0.01}
+          value={max > 0 ? Math.min(currentTime, max) : 0}
+          disabled={max <= 0}
+          aria-label="Seek"
+          className={cn(
+            "h-1.5 w-full cursor-pointer appearance-none rounded-full bg-surface-2 accent-client disabled:cursor-not-allowed disabled:opacity-40",
+            source === "reference" && "accent-reference",
+          )}
+          onPointerDown={() => {
+            scrubbingRef.current = true;
+          }}
+          onPointerUp={(event) => {
+            scrubbingRef.current = false;
+            seekTo(Number(event.currentTarget.value));
+          }}
+          onChange={(event) => {
+            const next = Number(event.currentTarget.value);
+            setCurrentTime(next);
+            if (!scrubbingRef.current) seekTo(next);
+          }}
+        />
+        <span className="w-9 shrink-0 font-mono text-[11px] text-text-muted tabular-nums">
+          {formatTime(duration)}
+        </span>
+      </div>
+
+      <div className="flex flex-col items-center gap-3">
+        <button
+          type="button"
+          onClick={() => onPlayingChange(!playing)}
+          title={playing ? "Pause" : "Play"}
+          aria-label={playing ? "Pause" : "Play"}
+          className={cn(
+            "flex items-center justify-center rounded-full bg-text-primary text-surface-0 transition-opacity hover:opacity-90",
+            isCompact ? "size-11" : "size-14",
+          )}
+        >
+          {playing ? (
+            <PauseIcon className={isCompact ? "size-4" : "size-5"} />
+          ) : (
+            <PlayIcon
+              className={cn(
+                isCompact ? "size-4" : "size-5",
+                "translate-x-0.5",
+              )}
+            />
+          )}
+        </button>
+
+        {canClient ? (
+          <div
+            role="group"
+            aria-label="A/B source"
+            className="flex w-full rounded-lg bg-surface-2 p-1 ring-1 ring-border"
+          >
+            <SourceSegment
+              label="Your track"
+              hint="A · 1"
+              active={source === "client"}
+              accent="client"
+              onClick={() => setSourceAndMaybePlay("client")}
+            />
+            <SourceSegment
+              label="Reference"
+              hint="B · 2"
+              active={source === "reference"}
+              accent="reference"
+              onClick={() => setSourceAndMaybePlay("reference")}
+            />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-function TransportButton({
+function SourceSegment({
   label,
-  accent,
-  disabled,
+  hint,
   active,
-  playing,
+  accent,
   onClick,
-  title,
-  size = "md",
 }: {
   label: string;
-  accent: "client" | "reference";
-  disabled: boolean;
+  hint: string;
   active: boolean;
-  playing: boolean;
+  accent: "client" | "reference";
   onClick: () => void;
-  title: string;
-  size?: "md" | "lg";
 }) {
   const isClient = accent === "client";
 
   return (
-    <div className="flex flex-col items-center gap-1.5">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={onClick}
-        title={title}
-        aria-label={playing ? `Pause ${label}` : `Play ${label}`}
-        aria-pressed={active}
-        className={cn(
-          "flex items-center justify-center rounded-full ring-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
-          size === "lg" ? "size-12" : "size-11",
-          active
-            ? isClient
-              ? "bg-client text-client-foreground ring-client"
-              : "bg-reference text-surface-0 ring-reference"
-            : "bg-surface-2 text-text-primary ring-border hover:bg-surface-0",
-        )}
-      >
-        {playing ? (
-          <PauseIcon className={size === "lg" ? "size-5" : "size-4"} />
-        ) : (
-          <PlayIcon
-            className={cn(
-              size === "lg" ? "size-5" : "size-4",
-              "translate-x-0.5",
-            )}
-          />
-        )}
-      </button>
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      title={`${label} (${hint})`}
+      className={cn(
+        "flex flex-1 flex-col items-center gap-0.5 rounded-md px-3 py-2 text-xs transition-colors",
+        active
+          ? isClient
+            ? "bg-client text-client-foreground"
+            : "bg-reference text-surface-0"
+          : "text-text-muted hover:text-text-primary",
+      )}
+    >
+      <span className="font-medium">{label}</span>
       <span
         className={cn(
-          "text-[11px]",
-          active ? "text-text-primary" : "text-text-muted",
+          "font-mono text-[10px]",
+          active ? "opacity-70" : "text-text-muted",
         )}
       >
-        {label}
+        {hint}
       </span>
-    </div>
+    </button>
   );
 }

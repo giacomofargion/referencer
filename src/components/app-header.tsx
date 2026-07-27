@@ -7,29 +7,16 @@ import { CreditsBalance } from "@/components/credits-balance";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-function TonemapMark({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 32 32"
-      fill="none"
-      aria-hidden
-    >
-      <rect width="32" height="32" rx="8" className="fill-client" />
-      {/* Simple vinyl / reel mark — reads as audio without competing with the wordmark */}
-      <circle cx="16" cy="16" r="9" className="stroke-client-foreground" strokeWidth="1.75" />
-      <circle cx="16" cy="16" r="3" className="fill-client-foreground" />
-      <path
-        d="M16 7v3.5M16 21.5V25M7 16h3.5M21.5 16H25"
-        className="stroke-client-foreground"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
+interface AppHeaderProps {
+  /** Brand-only chrome for auth pages (no nav / CTAs). */
+  brandOnly?: boolean;
 }
 
-export function AppHeader() {
+/** Draw-in underline in client teal — matches the Buy accent without competing with it. */
+const navLinkClass =
+  "relative inline-block pb-0.5 text-text-secondary transition-colors duration-300 ease-out hover:text-client after:absolute after:inset-x-0 after:bottom-0 after:h-px after:origin-left after:scale-x-0 after:bg-client after:transition-transform after:duration-300 after:ease-out hover:after:scale-x-100";
+
+export function AppHeader({ brandOnly = false }: AppHeaderProps) {
   const { isLoaded, isSignedIn } = useAuth();
   // Show auth CTAs unless we know the user is signed in. Clerk's <Show> hides
   // both branches while loading — and if the Clerk domain DNS is missing, that
@@ -37,60 +24,58 @@ export function AppHeader() {
   const showSignedOutActions = !isLoaded || !isSignedIn;
 
   return (
-    <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface-0/70 px-6 backdrop-blur-md">
+    <header
+      className={cn(
+        "sticky top-0 z-10 flex h-14 shrink-0 items-center border-b border-border bg-surface-0/70 px-6 backdrop-blur-md",
+        brandOnly ? "justify-start" : "justify-between",
+      )}
+    >
       <Link href="/" className="flex items-center gap-2.5">
-        <TonemapMark className="size-7 shrink-0" />
         <span className="text-sm font-semibold tracking-wide text-text-primary">
           TONEMAP
         </span>
-        <span className="hidden text-xs text-text-muted sm:inline">
-          Sonic reference matching
-        </span>
+        {!brandOnly && (
+          <span className="hidden text-xs text-text-muted sm:inline">
+            Sonic reference matching
+          </span>
+        )}
       </Link>
 
-      <div className="flex items-center gap-4">
-        {showSignedOutActions ? (
-          <>
-            <Link
-              href="/sign-in"
-              className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
-            >
-              Sign in
-            </Link>
-            <Link
-              href="/sign-up"
-              className={cn(buttonVariants({ size: "sm" }))}
-            >
-              Sign up
-            </Link>
-          </>
-        ) : (
-          <>
-            <nav className="flex items-center gap-4 text-sm">
+      {!brandOnly && (
+        <div className="flex items-center gap-4">
+          {showSignedOutActions ? (
+            <>
               <Link
-                href="/history"
-                className="text-text-secondary transition-colors hover:text-text-primary"
+                href="/sign-in"
+                className={cn(
+                  buttonVariants({ variant: "outline", size: "sm" }),
+                )}
               >
-                History
+                Sign in
               </Link>
               <Link
-                href="/projects"
-                className="text-text-secondary transition-colors hover:text-text-primary"
+                href="/sign-up"
+                className={cn(buttonVariants({ size: "sm" }))}
               >
-                Projects
+                Sign up
               </Link>
-            </nav>
-            <CreditsBalance />
-            <UserButton
-              appearance={{
-                elements: {
-                  avatarBox: "size-8",
-                },
-              }}
-            />
-          </>
-        )}
-      </div>
+            </>
+          ) : (
+            <>
+              <nav className="flex items-center gap-4 text-sm">
+                <Link href="/history" className={navLinkClass}>
+                  History
+                </Link>
+                <Link href="/projects" className={navLinkClass}>
+                  Projects
+                </Link>
+              </nav>
+              <CreditsBalance />
+              <UserButton />
+            </>
+          )}
+        </div>
+      )}
     </header>
   );
 }

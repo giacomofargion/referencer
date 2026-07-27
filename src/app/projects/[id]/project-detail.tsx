@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronRightIcon, PauseIcon, PlayIcon } from "lucide-react";
+import { ChevronRightIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { ABPlayer } from "@/components/ab-player";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatSessionDate } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 interface SessionRow {
   id: string;
@@ -49,41 +51,17 @@ export function ProjectDetail({
   const [saved, setSaved] = useState(initialSaved);
   const [busy, setBusy] = useState(false);
 
-  // One shared audio element so only one preview plays at a time.
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [playingId, setPlayingId] = useState<string | null>(null);
+  // One active shortlist row uses the shared AB transport (reference-only).
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
 
-  useEffect(() => {
-    const audio = audioRef.current;
-    return () => {
-      audio?.pause();
-    };
-  }, []);
-
-  function togglePreview(referenceId: string, previewUrl: string) {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    if (playingId === referenceId) {
-      audio.pause();
-      setPlayingId(null);
+  function selectReference(referenceId: string) {
+    if (activeId === referenceId) {
+      setPlaying((prev) => !prev);
       return;
     }
-
-    audio.src = previewUrl;
-    void audio
-      .play()
-      .then(() => setPlayingId(referenceId))
-      .catch((error: unknown) => {
-        // Rapid track switches abort the previous play() — ignore those.
-        if (
-          (error instanceof DOMException || error instanceof Error) &&
-          error.name === "AbortError"
-        ) {
-          return;
-        }
-        toast.error("Couldn't play this preview");
-      });
+    setActiveId(referenceId);
+    setPlaying(true);
   }
 
   async function handleRename() {
@@ -148,9 +126,9 @@ export function ProjectDetail({
       setSaved((current) =>
         current.filter((row) => row.id !== referenceTrackId),
       );
-      if (playingId === referenceTrackId) {
-        audioRef.current?.pause();
-        setPlayingId(null);
+      if (activeId === referenceTrackId) {
+        setPlaying(false);
+        setActiveId(null);
       }
       toast.message("Removed from shortlist");
     } catch (error) {
@@ -158,8 +136,10 @@ export function ProjectDetail({
     }
   }
 
+  const activeRef = saved.find((row) => row.id === activeId) ?? null;
+
   return (
-    <div className="flex flex-col gap-10">
+    <div className="flex flex-col gap-8">
       <div className="flex flex-col gap-3">
         {editing ? (
           <div className="flex flex-wrap gap-2">
@@ -216,22 +196,22 @@ export function ProjectDetail({
       </div>
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold text-text-primary">Sessions</h2>
+        <h2 className="text-base font-medium text-text-primary">Sessions</h2>
         {sessions.length === 0 ? (
           <p className="text-sm text-text-muted">
             No sessions assigned yet. Pick this project when analyzing, or
             assign from a session after starring a reference.
           </p>
         ) : (
-          <ul className="flex flex-col gap-2">
+          <ul className="flex flex-col gap-3">
             {sessions.map((session) => (
               <li key={session.id}>
                 <Link
                   href={`/sessions/${session.id}?from=${encodeURIComponent(`/projects/${projectId}`)}`}
-                  className="group flex items-center gap-3 rounded-lg border border-border bg-surface-1 px-3 py-3 transition-colors hover:border-text-muted hover:bg-surface-2"
+                  className="group list-row-hover flex items-center gap-4 rounded-xl border border-border bg-surface-1 px-5 py-5"
                 >
-                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="truncate font-medium text-text-primary group-hover:text-client">
+                  <div className="flex min-w-0 flex-1 flex-col gap-1">
+                    <span className="truncate text-base font-medium tracking-tight text-text-primary group-hover:text-client">
                       {session.title}
                     </span>
                     <span className="font-mono text-xs text-text-muted">
@@ -240,9 +220,6 @@ export function ProjectDetail({
                       {session.matchCount === 1 ? "" : "s"}
                     </span>
                   </div>
-                  <span className="hidden shrink-0 text-xs text-text-secondary sm:inline">
-                    View references
-                  </span>
                   <ChevronRightIcon
                     className="size-4 shrink-0 text-text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-client"
                     aria-hidden
@@ -255,7 +232,7 @@ export function ProjectDetail({
       </section>
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold text-text-primary">
+        <h2 className="text-base font-medium text-text-primary">
           Saved references
         </h2>
         {saved.length === 0 ? (
@@ -264,74 +241,76 @@ export function ProjectDetail({
           </p>
         ) : (
           <ul className="flex flex-col gap-3">
-            <audio
-              ref={audioRef}
-              preload="none"
-              onEnded={() => setPlayingId(null)}
-            />
             {saved.map((ref) => {
-              const isPlaying = playingId === ref.id;
+              const isActive = activeId === ref.id;
               return (
                 <li
                   key={ref.savedId}
-                  className="flex items-center gap-3 rounded-lg border border-border bg-surface-1 px-3 py-2"
+                  className={cn(
+                    "flex flex-col gap-3 rounded-xl border border-border bg-surface-1 px-4 py-3",
+                    isActive && "ring-1 ring-reference/40",
+                  )}
                 >
-                  <button
-                    type="button"
-                    onClick={() => togglePreview(ref.id, ref.previewUrl)}
-                    aria-label={
-                      isPlaying
-                        ? `Pause ${ref.title} preview`
-                        : `Play ${ref.title} preview`
-                    }
-                    className="group relative size-14 shrink-0 overflow-hidden rounded-md"
-                  >
-                    {ref.artworkUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element -- iTunes CDN artwork, same as carousel
-                      <img
-                        src={ref.artworkUrl}
-                        alt=""
-                        width={56}
-                        height={56}
-                        className="size-14 object-cover"
-                      />
-                    ) : (
-                      <div className="size-14 bg-surface-2" />
-                    )}
-                    <span className="absolute inset-0 flex items-center justify-center bg-surface-0/55">
-                      <span className="flex size-8 items-center justify-center rounded-full bg-surface-0/90 text-text-primary ring-1 ring-border">
-                        {isPlaying ? (
-                          <PauseIcon className="size-3.5" />
-                        ) : (
-                          <PlayIcon className="size-3.5 translate-x-px" />
-                        )}
-                      </span>
-                    </span>
-                  </button>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-text-primary">
-                      {ref.title}
-                    </p>
-                    <p className="truncate text-xs text-text-muted">
-                      {ref.artist}
-                    </p>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => selectReference(ref.id)}
+                      aria-label={
+                        isActive && playing
+                          ? `Pause ${ref.title}`
+                          : `Play ${ref.title}`
+                      }
+                      className="relative size-14 shrink-0 overflow-hidden rounded-md"
+                    >
+                      {ref.artworkUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element -- iTunes CDN artwork, same as carousel
+                        <img
+                          src={ref.artworkUrl}
+                          alt=""
+                          width={56}
+                          height={56}
+                          className="size-14 object-cover"
+                        />
+                      ) : (
+                        <div className="size-14 bg-surface-2" />
+                      )}
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-text-primary">
+                        {ref.title}
+                      </p>
+                      <p className="truncate text-xs text-text-muted">
+                        {ref.artist}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => selectReference(ref.id)}
+                    >
+                      {isActive && playing ? "Pause" : "Play"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleUnsave(ref.id)}
+                    >
+                      Remove
+                    </Button>
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => togglePreview(ref.id, ref.previewUrl)}
-                  >
-                    {isPlaying ? "Pause" : "Play"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => handleUnsave(ref.id)}
-                  >
-                    Remove
-                  </Button>
+
+                  {isActive && activeRef && (
+                    <ABPlayer
+                      key={activeRef.id}
+                      clientUrl={null}
+                      referenceUrl={activeRef.previewUrl}
+                      playing={playing}
+                      onPlayingChange={setPlaying}
+                      layout="compact"
+                    />
+                  )}
                 </li>
               );
             })}

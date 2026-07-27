@@ -54,14 +54,14 @@ export function MatchCard({
       initial="hidden"
       animate="visible"
     >
-      <Card className="border-border bg-surface-1">
-        <CardContent className="flex flex-col gap-4">
+      <Card className="border-border bg-surface-0/40 sm:bg-surface-1">
+        <CardContent className="flex flex-col gap-3 sm:gap-4">
           {saveControl && (
             <div className="flex justify-end">{saveControl}</div>
           )}
           <p className="text-sm text-text-secondary">{match.explanation}</p>
 
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-text-muted sm:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-xs text-text-muted sm:grid-cols-4 sm:gap-y-1">
             <div className="flex justify-between gap-2 sm:block">
               <dt>Loudness</dt>
               <dd className="text-text-secondary">
