@@ -1,9 +1,9 @@
 import { Mp3Encoder } from "@breezystack/lamejs";
 
 /**
- * Browser-side MP3 clip encoder. Cyanite similarity only needs a
- * representative slice, and the Next.js proxy caps request bodies at 10MB —
- * so we send a centered 60s mono 128kbps MP3 (~1MB) instead of the raw WAV.
+ * Browser-side MP3 clip encoder for optional R2 storage / session reopen.
+ * Next.js proxy caps request bodies at 10MB, so we send a centered 60s mono
+ * 128kbps MP3 (~1MB) instead of the raw WAV. Live A/B uses the local file.
  */
 const CLIP_SECONDS = 60;
 const SAMPLE_RATE = 44100;

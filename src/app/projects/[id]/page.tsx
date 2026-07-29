@@ -47,7 +47,8 @@ export default async function ProjectPage({ params }: PageProps) {
       rt.title,
       rt.artist,
       rt.artwork_url,
-      rt.preview_url
+      rt.preview_url,
+      rt.preview_start_sec
     FROM saved_references sr
     JOIN reference_tracks rt ON rt.id = sr.reference_track_id
     WHERE sr.project_id = ${id}
@@ -76,6 +77,10 @@ export default async function ProjectPage({ params }: PageProps) {
             artist: row.artist as string,
             artworkUrl: (row.artwork_url as string | null) ?? null,
             previewUrl: row.preview_url as string,
+            previewStartSec:
+              row.preview_start_sec == null
+                ? null
+                : Number(row.preview_start_sec),
           }))}
         />
       </PageShell>

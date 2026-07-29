@@ -11,7 +11,7 @@ export default function Home() {
           <h1 className="text-hero-gradient text-3xl font-semibold tracking-tight">
             Find a reference track
           </h1>
-          <p className="max-w-xl text-sm leading-relaxed text-text-secondary">
+          <p className="max-w-xl text-sm mb-4 leading-relaxed text-text-secondary">
             Upload a mix. We match it to commercial releases you can A/B against
             your track.
           </p>

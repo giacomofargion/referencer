@@ -68,7 +68,7 @@ function normalizeSearchResult(item: ItunesSearchResult): ItunesTrack | null {
 }
 
 /**
- * Free-text song search. Used to hydrate Cyanite/Spotify similarities into
+ * Free-text song search. Used to hydrate genre/seed-artist discovery into
  * iTunes previews for A/B playback + Essentia analysis.
  */
 export async function searchItunesSongs(

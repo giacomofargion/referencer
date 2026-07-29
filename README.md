@@ -105,21 +105,29 @@ Credits wallet: `scripts/migrations/002_credits.sql`
 
 ### Credits & Stripe
 
-Each similarity search spends **1 credit** from the signed-in user’s wallet before Cyanite runs. Failed Cyanite calls refund the credit. New users get a one-time starter grant (`FREE_STARTER_CREDITS`, default 2).
+Each similarity search spends **1 credit** from the signed-in user’s wallet before the match runs. Failed matches refund the credit. New users get a one-time starter grant (`FREE_STARTER_CREDITS`, default 5).
 
-1. Create a Stripe account → copy **Secret key** and **Publishable key** into `.env.local`.
-2. Set `CREDIT_PRICE_CENTS` (GBP pence per credit; default `190` = £1.90).
-3. Local webhook forwarding:
+Money goes to **whatever Stripe account owns `STRIPE_SECRET_KEY`**. There is no Connect / third-party split.
+
+1. [Stripe API keys](https://dashboard.stripe.com/apikeys) — toggle **Test** vs **Live** in the Dashboard.
+2. **Local:** keep `sk_test_` / `pk_test_` in `.env.local`. Forward webhooks:
 
 ```bash
 stripe listen --forward-to localhost:3000/api/credits/webhook
 ```
 
-Paste the webhook signing secret into `STRIPE_WEBHOOK_SECRET`.
+Paste that CLI signing secret into local `STRIPE_WEBHOOK_SECRET`.
 
-4. Production: point a Stripe webhook at `https://YOUR_DOMAIN/api/credits/webhook` for `checkout.session.completed`.
+3. **Production (required for real payments):** set these on the host (e.g. Vercel → Production):
+   - `STRIPE_SECRET_KEY` = `sk_live_…`
+   - `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` = `pk_live_…`
+   - `STRIPE_WEBHOOK_SECRET` = signing secret from a **Live** webhook endpoint at  
+     `https://YOUR_DOMAIN/api/credits/webhook` listening for `checkout.session.completed`
+4. Set `CREDIT_PRICE_CENTS` (GBP pence; default `49`). Packs: 5 @ 49p, 20 @ 39p, 50 @ 35p, 100 @ 29p.
 
-Buy UI: header **Buy** opens a dialog (presets + custom quantity) → Stripe Checkout.
+Buy UI: header **Buy** → pack dialog → Stripe Checkout.
+
+Also finish Stripe **Live** account activation (business details, bank payout) or live charges stay blocked.
 
 ---
 

@@ -8,6 +8,14 @@ import { toast } from "sonner";
 
 import { ABPlayer } from "@/components/ab-player";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { formatSessionDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -28,6 +36,7 @@ interface SavedRow {
   artist: string;
   artworkUrl: string | null;
   previewUrl: string;
+  previewStartSec?: number | null;
 }
 
 interface ProjectDetailProps {
@@ -50,6 +59,7 @@ export function ProjectDetail({
   const [sessions] = useState(initialSessions);
   const [saved, setSaved] = useState(initialSaved);
   const [busy, setBusy] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   // One active shortlist row uses the shared AB transport (reference-only).
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -92,9 +102,6 @@ export function ProjectDetail({
   }
 
   async function handleDelete() {
-    if (!window.confirm(`Delete project “${name}”? Sessions stay in History.`)) {
-      return;
-    }
     setBusy(true);
     try {
       const response = await fetch(`/api/projects/${projectId}`, {
@@ -104,6 +111,7 @@ export function ProjectDetail({
         const { error } = await response.json();
         throw new Error(error ?? "Could not delete");
       }
+      setDeleteOpen(false);
       toast.message("Project deleted");
       router.push("/projects");
     } catch (error) {
@@ -182,7 +190,7 @@ export function ProjectDetail({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleDelete}
+                onClick={() => setDeleteOpen(true)}
                 disabled={busy}
               >
                 Delete
@@ -194,6 +202,45 @@ export function ProjectDetail({
           Sessions in this job and your saved commercial references.
         </p>
       </div>
+
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (busy) return;
+          setDeleteOpen(open);
+        }}
+      >
+        <DialogContent
+          className="bg-surface-1 sm:max-w-md"
+          showCloseButton={!busy}
+        >
+          <DialogHeader>
+            <DialogTitle>Delete project?</DialogTitle>
+            <DialogDescription>
+              “{name}” will be removed. Sessions stay in History — only the
+              project and its saved references shortlist are deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void handleDelete()}
+              disabled={busy}
+            >
+              {busy ? "Deleting…" : "Delete project"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <section className="flex flex-col gap-3">
         <h2 className="text-base font-medium text-text-primary">Sessions</h2>
@@ -306,6 +353,7 @@ export function ProjectDetail({
                       key={activeRef.id}
                       clientUrl={null}
                       referenceUrl={activeRef.previewUrl}
+                      referenceStartSec={activeRef.previewStartSec}
                       playing={playing}
                       onPlayingChange={setPlaying}
                       layout="compact"

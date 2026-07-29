@@ -18,7 +18,7 @@ function isValidFeatureVector(value: unknown): value is FeatureVector {
   );
 }
 
-/** Attaches the browser-computed feature vector to an upload record. */
+/** Attaches the browser-computed feature vector to an upload. */
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },

@@ -39,3 +39,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# MERT worker local catalog + venv
+/workers/mert-embed/.venv/
+/workers/mert-embed/data/
+/workers/mert-embed/models/*.pb
+
+# Large Discogs TFJS shards (optional browser path)
+/public/models/discogs-genre/*.bin
+/public/models/discogs-genre/model.json
+
+# Kaggle embedding dump (multi-GB) — do not commit
+/archive/

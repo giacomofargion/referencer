@@ -57,6 +57,15 @@ function cardMetrics(containerWidth: number) {
   };
 }
 
+function centerOffsetFor(
+  containerWidth: number,
+  cardSize: number,
+  step: number,
+  index: number,
+): number {
+  return containerWidth / 2 - cardSize / 2 - index * step;
+}
+
 export function MatchCarousel({
   matches,
   activeIndex,
@@ -68,11 +77,16 @@ export function MatchCarousel({
 }: MatchCarouselProps) {
   const trackX = useMotionValue(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const activeIndexRef = useRef(activeIndex);
+  const dragMovedRef = useRef(false);
   const [metrics, setMetrics] = useState(() => cardMetrics(360));
   const active = matches[activeIndex];
   const { cardSize, cardGap, step, activeLift, compact } = metrics;
 
-  // Keep artwork size + track offset in sync with the listening column width.
+  activeIndexRef.current = activeIndex;
+
+  // Size the cards to the column; only snap position on resize (not on index
+  // change — that would fight the spring and look like a hitch).
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -81,31 +95,31 @@ export function MatchCarousel({
       const width = containerRef.current?.clientWidth ?? 360;
       const next = cardMetrics(width);
       setMetrics(next);
-
-      const centerOffset =
-        width / 2 - next.cardSize / 2 - activeIndex * next.step;
-      trackX.set(centerOffset);
+      trackX.set(
+        centerOffsetFor(width, next.cardSize, next.step, activeIndexRef.current),
+      );
     }
 
     sync();
     const observer = new ResizeObserver(sync);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [activeIndex, trackX]);
+  }, [trackX]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container || matches.length === 0) return;
 
-    const centerOffset =
-      container.clientWidth / 2 - cardSize / 2 - activeIndex * step;
-
-    animate(trackX, centerOffset, {
-      type: "spring",
-      stiffness: 280,
-      damping: 32,
-      mass: 0.85,
-    });
+    void animate(
+      trackX,
+      centerOffsetFor(container.clientWidth, cardSize, step, activeIndex),
+      {
+        type: "spring",
+        stiffness: 280,
+        damping: 32,
+        mass: 0.85,
+      },
+    );
   }, [activeIndex, matches.length, trackX, cardSize, step]);
 
   useEffect(() => {
@@ -124,6 +138,10 @@ export function MatchCarousel({
 
   function handleDragEnd(_: unknown, info: PanInfo) {
     const { offset, velocity } = info;
+    if (Math.abs(offset.x) > 8 || Math.abs(velocity.x) > 50) {
+      dragMovedRef.current = true;
+    }
+
     let next = activeIndex;
     if (offset.x < -DRAG_THRESHOLD || velocity.x < -VELOCITY_THRESHOLD) {
       next = Math.min(matches.length - 1, activeIndex + 1);
@@ -134,15 +152,24 @@ export function MatchCarousel({
 
     const container = containerRef.current;
     if (container) {
-      const centerOffset =
-        container.clientWidth / 2 - cardSize / 2 - next * step;
-      animate(trackX, centerOffset, {
-        type: "spring",
-        stiffness: 280,
-        damping: 32,
-        mass: 0.85,
-      });
+      void animate(
+        trackX,
+        centerOffsetFor(container.clientWidth, cardSize, step, next),
+        {
+          type: "spring",
+          stiffness: 280,
+          damping: 32,
+          mass: 0.85,
+        },
+      );
     }
+  }
+
+  function handleCardClick(index: number, isActive: boolean) {
+    // Framer fires click after a swipe; ignore that synthetic one.
+    if (dragMovedRef.current) return;
+    if (isActive) onTogglePlay();
+    else onActiveIndexChange(index);
   }
 
   if (matches.length === 0 || !active) return null;
@@ -165,6 +192,12 @@ export function MatchCarousel({
             drag="x"
             dragConstraints={{ left: -Infinity, right: Infinity }}
             dragElastic={0.12}
+            onPointerDown={() => {
+              dragMovedRef.current = false;
+            }}
+            onDrag={(_, info) => {
+              if (Math.abs(info.offset.x) > 8) dragMovedRef.current = true;
+            }}
             onDragEnd={handleDragEnd}
           >
             {matches.map((match, index) => {
@@ -175,10 +208,7 @@ export function MatchCarousel({
                 <motion.button
                   key={match.id}
                   type="button"
-                  onClick={() => {
-                    if (isActive) onTogglePlay();
-                    else onActiveIndexChange(index);
-                  }}
+                  onClick={() => handleCardClick(index, isActive)}
                   aria-label={
                     isActive
                       ? playing
@@ -276,7 +306,7 @@ export function MatchCarousel({
       </div>
 
       <div className="flex flex-col items-center gap-4 sm:gap-5">
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={`meta-${active.id}`}
             variants={fadeInUp}
@@ -303,6 +333,7 @@ export function MatchCarousel({
             key={`player-${active.id}`}
             clientUrl={clientPlaybackUrl}
             referenceUrl={active.previewUrl}
+            referenceStartSec={active.previewStartSec}
             playing={playing}
             onPlayingChange={onPlayingChange}
             layout={compact ? "compact" : "full"}

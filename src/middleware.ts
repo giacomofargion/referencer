@@ -5,7 +5,6 @@ const isPublicRoute = createRouteMatcher([
   "/",
   "/sign-in(.*)",
   "/sign-up(.*)",
-  "/api/cyanite/webhook",
   "/api/credits/webhook",
 ]);
 
