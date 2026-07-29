@@ -1,7 +1,10 @@
 """Discogs-EffNet genre tagging (400 Discogs styles → catalog genre).
 
-Uses the official Essentia Discogs-EffNet frozen graph which maps mel patches
-[64, 128, 96] → sigmoid activations [64, 400] (PartitionedCall:0).
+Two-stage Essentia pipeline:
+  1) discogs-effnet-bs64-1.pb — mel patches [64, 128, 96] → embeddings [64, 1280]
+     (PartitionedCall:1)
+  2) genre_discogs400-discogs-effnet-1.pb — embeddings → 400-class sigmoid
+     (serving_default_model_Placeholder → PartitionedCall:0)
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import tensorflow as tf
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 EFFNET_PB = MODELS_DIR / "discogs-effnet-bs64-1.pb"
+HEAD_PB = MODELS_DIR / "genre_discogs400-discogs-effnet-1.pb"
 LABELS_JSON = MODELS_DIR / "genre_discogs400-discogs-effnet-1.json"
 
 SAMPLE_RATE = 16_000
@@ -25,6 +29,7 @@ HOP = 256
 N_MELS = 96
 PATCH_FRAMES = 128
 BATCH_SIZE = 64
+EMBED_DIM = 1280
 # Max seconds of audio to classify (centered) — keeps inference snappy.
 MAX_SECONDS = 45.0
 
@@ -98,48 +103,86 @@ def discogs_label_to_catalog(label: str) -> str | None:
     return _discogs_parent_to_catalog(parent)
 
 
+def _load_graph_session(pb_path: Path) -> tuple[tf.Graph, tf.compat.v1.Session]:
+    graph_def = tf.compat.v1.GraphDef()
+    graph_def.ParseFromString(pb_path.read_bytes())
+    graph = tf.Graph()
+    with graph.as_default():
+        tf.import_graph_def(graph_def, name="")
+        session = tf.compat.v1.Session(graph=graph)
+    return graph, session
+
+
 class DiscogsGenreClassifier:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._session: tf.compat.v1.Session | None = None
-        self._input = None
-        self._output = None
+        self._effnet_session: tf.compat.v1.Session | None = None
+        self._effnet_input = None
+        self._effnet_embed = None
+        self._head_session: tf.compat.v1.Session | None = None
+        self._head_input = None
+        self._head_output = None
         self._labels: list[str] = []
 
     @property
     def ready(self) -> bool:
-        return self._session is not None and bool(self._labels)
+        return (
+            self._effnet_session is not None
+            and self._head_session is not None
+            and bool(self._labels)
+        )
 
     def load(self) -> None:
-        if self.ready:
-            return
-        if not EFFNET_PB.is_file() or not LABELS_JSON.is_file():
-            raise FileNotFoundError(
-                f"Discogs models missing under {MODELS_DIR} — "
-                "download discogs-effnet-bs64-1.pb and genre_discogs400 JSON"
+        # Serialize init so concurrent predict/health callers share one pair of sessions.
+        with self._lock:
+            if self.ready:
+                return
+            missing = [
+                path.name
+                for path in (EFFNET_PB, HEAD_PB, LABELS_JSON)
+                if not path.is_file()
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    f"Discogs models missing under {MODELS_DIR}: {', '.join(missing)} — "
+                    "run scripts/download_discogs_models.sh"
+                )
+
+            meta = json.loads(LABELS_JSON.read_text())
+            self._labels = list(meta["classes"])
+
+            effnet_graph, self._effnet_session = _load_graph_session(EFFNET_PB)
+            self._effnet_input = effnet_graph.get_tensor_by_name(
+                "serving_default_melspectrogram:0"
             )
+            # Embedding output — do not use PartitionedCall:0 on this graph for labels.
+            self._effnet_embed = effnet_graph.get_tensor_by_name("PartitionedCall:1")
 
-        meta = json.loads(LABELS_JSON.read_text())
-        self._labels = list(meta["classes"])
+            head_graph, self._head_session = _load_graph_session(HEAD_PB)
+            self._head_input = head_graph.get_tensor_by_name(
+                "serving_default_model_Placeholder:0"
+            )
+            self._head_output = head_graph.get_tensor_by_name("PartitionedCall:0")
 
-        graph_def = tf.compat.v1.GraphDef()
-        graph_def.ParseFromString(EFFNET_PB.read_bytes())
-        graph = tf.Graph()
-        with graph.as_default():
-            tf.import_graph_def(graph_def, name="")
-            self._input = graph.get_tensor_by_name("serving_default_melspectrogram:0")
-            # PartitionedCall:0 = 400-d Discogs style sigmoid activations
-            self._output = graph.get_tensor_by_name("PartitionedCall:0")
-            self._session = tf.compat.v1.Session(graph=graph)
-
-        # Warmup
-        zeros = np.zeros((BATCH_SIZE, PATCH_FRAMES, N_MELS), dtype=np.float32)
-        assert self._session is not None
-        self._session.run(self._output, {self._input: zeros})
+            # Warmup both stages
+            mel_zeros = np.zeros(
+                (BATCH_SIZE, PATCH_FRAMES, N_MELS), dtype=np.float32
+            )
+            embed_zeros = np.zeros((BATCH_SIZE, EMBED_DIM), dtype=np.float32)
+            assert self._effnet_session is not None and self._head_session is not None
+            self._effnet_session.run(self._effnet_embed, {self._effnet_input: mel_zeros})
+            self._head_session.run(self._head_output, {self._head_input: embed_zeros})
 
     def predict_bytes(self, audio_bytes: bytes) -> GenrePrediction:
         self.load()
-        assert self._session is not None and self._input is not None and self._output is not None
+        assert (
+            self._effnet_session is not None
+            and self._effnet_input is not None
+            and self._effnet_embed is not None
+            and self._head_session is not None
+            and self._head_input is not None
+            and self._head_output is not None
+        )
 
         y, _ = librosa.load(io_bytes_to_pathlike(audio_bytes), sr=SAMPLE_RATE, mono=True)
         if y.size < SAMPLE_RATE // 4:
@@ -167,8 +210,15 @@ class DiscogsGenreClassifier:
                 batch = np.concatenate([batch, pad], axis=0)
             else:
                 valid = BATCH_SIZE
-            out = self._session.run(self._output, {self._input: batch})
-            scores += out[:valid].sum(axis=0)
+            embeddings = self._effnet_session.run(
+                self._effnet_embed, {self._effnet_input: batch}
+            )
+            # Head accepts dynamic batch — only the real patches, not EffNet padding.
+            out = self._head_session.run(
+                self._head_output,
+                {self._head_input: embeddings[:valid]},
+            )
+            scores += out.sum(axis=0)
             n_batches += valid
 
         scores /= max(1, n_batches)

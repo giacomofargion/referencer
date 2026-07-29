@@ -37,15 +37,48 @@ function tokenOverlap(a: string, b: string): number {
   return union === 0 ? 0 : inter / union;
 }
 
+/**
+ * True when `longer` is `shorter` plus an explicit version/feature suffix
+ * (e.g. "song title" ⊂ "song title radio edit"), not more core title words
+ * ("stay" ⊄ "stay with me").
+ */
+function isPrefixWithVersionSuffix(longer: string, shorter: string): boolean {
+  if (!longer.startsWith(shorter)) return false;
+  if (longer.length === shorter.length) return true;
+  // Require a token boundary so "stay" does not match inside "staying".
+  if (longer[shorter.length] !== " ") return false;
+  const rest = longer.slice(shorter.length).trim();
+  if (!rest) return true;
+  return /^(?:[\(\[]|[-–—:]\s*)?(?:feat\.?|ft\.?|featuring|remix|remaster(?:ed)?|live|edit|version|mix|radio|acoustic|deluxe|extended|instrumental|bonus|mono|stereo)\b/.test(
+    rest,
+  );
+}
+
 function containsLoosely(haystack: string, needle: string): boolean {
   const h = normalizeMusicText(haystack);
   const n = normalizeMusicText(needle);
   if (!h || !n) return false;
   if (h === n) return true;
-  if (h.includes(n) || n.includes(h)) return true;
-  // First meaningful chunk of a long title (drop remix suffixes etc.)
-  const short = n.split(" ").slice(0, 4).join(" ");
-  return short.length >= 4 && h.includes(short);
+
+  // Containment only for explicit version/feature suffixes — not weak prefixes.
+  if (isPrefixWithVersionSuffix(h, n) || isPrefixWithVersionSuffix(n, h)) {
+    return true;
+  }
+
+  // Strong token agreement (stricter than the pickStrictItunesMatch thresholds).
+  if (tokenOverlap(h, n) >= 0.75) return true;
+
+  // Long titles: compare a ≥3-token head via the same suffix rule only
+  // (never bare includes — that reintroduces "Stay" ⊂ "Stay With Me").
+  const tokens = n.split(" ").filter(Boolean);
+  if (tokens.length >= 3) {
+    const head = tokens.slice(0, 4).join(" ");
+    if (isPrefixWithVersionSuffix(h, head) || isPrefixWithVersionSuffix(head, h)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
