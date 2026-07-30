@@ -32,9 +32,7 @@ export function isFeatureVector(value: unknown): value is FeatureVector {
     isNumber(v.loudnessRangeDb) &&
     isNumber(v.tempoBpm) &&
     isNumber(v.stereoWidth) &&
-    Array.isArray(v.frequencyBandEnergies) &&
-    v.frequencyBandEnergies.length === 7 &&
-    v.frequencyBandEnergies.every((n) => typeof n === "number")
+    isNumberArray(v.frequencyBandEnergies, 7)
   );
 }
 

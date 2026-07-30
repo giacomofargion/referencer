@@ -3,6 +3,7 @@
  * Discogs-EffNet genre tagging worker (classic worker).
  * Mel features via Essentia TensorflowInputMusiCNN; 400-class head via TF.js
  * GraphModel under /models/discogs-genre/ (see scripts/download-discogs-tfjs.sh).
+ * TF.js UMD is self-hosted at /vendor/tf.min.js (see scripts/vendor-tfjs.sh).
  */
 
 const RUNTIME_TIMEOUT_MS = 20_000;
@@ -10,8 +11,9 @@ const RUNTIME_TIMEOUT_MS = 20_000;
 // UMD wasm ends with `exports.EssentiaWASM = Module`; workers have no exports.
 self.exports = {};
 
+// Load TF.js before Essentia model helpers (they expect global `tf`).
 importScripts(
-  "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js",
+  "/vendor/tf.min.js",
   "/essentia/essentia-wasm.umd.js",
   "/essentia/essentia.js-core.js",
   "/essentia/essentia.js-model.umd.js",
@@ -95,15 +97,73 @@ function loadLabels() {
   return labelsPromise;
 }
 
-function downsampleTo16k(mono, sampleRate) {
-  if (sampleRate === TARGET_SR) return mono;
+/**
+ * Mirror EssentiaTFInputExtractor.downsampleAudioBuffer: OfflineAudioContext
+ * resamples with the browser's anti-aliased converter.
+ * Not available in dedicated workers today — callers fall back to software.
+ */
+async function downsampleWithOfflineContext(mono, sampleRate) {
+  const OfflineCtx = self.OfflineAudioContext || self.webkitOfflineAudioContext;
+  const durationSec = mono.length / sampleRate;
+  const frames = Math.max(1, Math.ceil(durationSec * TARGET_SR));
+  const ctx = new OfflineCtx(1, frames, TARGET_SR);
+  const buffer = ctx.createBuffer(1, mono.length, sampleRate);
+  buffer.copyToChannel(mono, 0);
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  source.start(0);
+  const rendered = await ctx.startRendering();
+  return rendered.getChannelData(0);
+}
+
+/**
+ * Software anti-aliased resample when Web Audio is unavailable in-worker.
+ * Downsample: average each input bucket (box low-pass) to kill aliases above
+ * TARGET_SR/2. Upsample: linear interpolation.
+ */
+function downsampleSoftware(mono, sampleRate) {
   const ratio = sampleRate / TARGET_SR;
-  const outLen = Math.floor(mono.length / ratio);
+  const outLen = Math.max(1, Math.floor(mono.length / ratio));
   const out = new Float32Array(outLen);
+
+  if (sampleRate > TARGET_SR) {
+    let offset = 0;
+    for (let i = 0; i < outLen; i++) {
+      const next = Math.min(mono.length, Math.round((i + 1) * ratio));
+      let sum = 0;
+      for (let j = offset; j < next; j++) sum += mono[j];
+      const count = next - offset;
+      out[i] = count > 0 ? sum / count : 0;
+      offset = next;
+    }
+    return out;
+  }
+
   for (let i = 0; i < outLen; i++) {
-    out[i] = mono[Math.min(mono.length - 1, Math.floor(i * ratio))];
+    const src = i * ratio;
+    const i0 = Math.floor(src);
+    const i1 = Math.min(mono.length - 1, i0 + 1);
+    const t = src - i0;
+    out[i] = mono[i0] * (1 - t) + mono[i1] * t;
   }
   return out;
+}
+
+async function downsampleTo16k(mono, sampleRate) {
+  if (sampleRate === TARGET_SR) return mono;
+
+  // Dedicated workers lack OfflineAudioContext (same API Essentia vendors);
+  // try it anyway for environments that expose it, else software anti-alias.
+  const OfflineCtx = self.OfflineAudioContext || self.webkitOfflineAudioContext;
+  if (typeof OfflineCtx === "function") {
+    try {
+      return await downsampleWithOfflineContext(mono, sampleRate);
+    } catch {
+      /* fall through */
+    }
+  }
+  return downsampleSoftware(mono, sampleRate);
 }
 
 function centerSlice(mono, sampleRate) {
@@ -140,7 +200,7 @@ async function classify(mono, sampleRate) {
   const EssentiaWASM = await essentiaWasmReady;
   const [model, labels] = await Promise.all([loadModel(), loadLabels()]);
 
-  const audio = centerSlice(downsampleTo16k(mono, sampleRate), TARGET_SR);
+  const audio = centerSlice(await downsampleTo16k(mono, sampleRate), TARGET_SR);
   const extractor = new EssentiaModel.EssentiaTFInputExtractor(
     EssentiaWASM,
     "musicnn",
@@ -148,6 +208,10 @@ async function classify(mono, sampleRate) {
   );
   let features;
   try {
+    // MusiCNN frame features need ≥512 samples (frame size); reject early.
+    if (audio.length < 512) {
+      throw new Error("Audio too short for Discogs genre model");
+    }
     features = extractor.computeFrameWise(audio, MEL_HOP);
   } finally {
     extractor.delete();

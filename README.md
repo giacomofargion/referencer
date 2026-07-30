@@ -87,11 +87,11 @@ No paid music-AI API and no always-on Python worker required for the live path.
 ```bash
 cp .env.example .env.local   # Clerk, Neon, Stripe test keys, R2
 npm install
-npm run models:discogs       # Discogs TF.js weights → public/models/discogs-genre/
+npm run models:discogs       # TF.js UMD + Discogs weights → public/vendor + public/models/discogs-genre/
 npm run dev
 ```
 
-`npm run build` also downloads Discogs weights via `prebuild` (needed for Vercel).
+`npm run build` also vendors TF.js and downloads Discogs weights via `prebuild` (needed for Vercel).
 
 ### Cloudflare R2 setup
 

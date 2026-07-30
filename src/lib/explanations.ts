@@ -1,5 +1,8 @@
 import { FREQUENCY_BANDS, type FeatureVector } from "@/lib/types";
-import { getAggregateFeatures } from "@/lib/feature-vector";
+import {
+  getAggregateFeatures,
+  isFeatureFingerprint,
+} from "@/lib/feature-vector";
 import type { StoredFingerprint } from "@/lib/types";
 
 const BAND_LABELS: Record<(typeof FREQUENCY_BANDS)[number]["name"], string> = {
@@ -15,7 +18,11 @@ const BAND_LABELS: Record<(typeof FREQUENCY_BANDS)[number]["name"], string> = {
 function asFeatures(
   value: FeatureVector | StoredFingerprint,
 ): FeatureVector {
-  return getAggregateFeatures(value as StoredFingerprint);
+  // v2 fingerprint envelope → aggregate; bare FeatureVector is already usable.
+  if (isFeatureFingerprint(value)) {
+    return getAggregateFeatures(value);
+  }
+  return value;
 }
 
 /**

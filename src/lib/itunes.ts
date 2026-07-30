@@ -24,6 +24,7 @@ interface ItunesSearchResult {
 
 /** Soft iTunes limit is ~20 req/min — serialize lookups with a gap. */
 const MIN_GAP_MS = 3500;
+const FETCH_TIMEOUT_MS = 8_000;
 let lastRequestAt = 0;
 let queue: Promise<void> = Promise.resolve();
 
@@ -35,6 +36,7 @@ async function throttledFetch(url: string): Promise<Response> {
     return fetch(url, {
       headers: { Accept: "application/json" },
       next: { revalidate: 0 },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   });
   // Keep the chain alive even if a request fails
@@ -108,9 +110,8 @@ export async function lookupItunesTracks(
 
   for (let i = 0; i < unique.length; i += 20) {
     const batch = unique.slice(i, i + 20);
-    const response = await fetch(
+    const response = await throttledFetch(
       `https://itunes.apple.com/lookup?id=${batch.join(",")}`,
-      { headers: { Accept: "application/json" }, next: { revalidate: 0 } },
     );
     if (!response.ok) continue;
     const data = (await response.json()) as { results?: ItunesSearchResult[] };

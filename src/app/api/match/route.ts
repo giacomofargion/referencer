@@ -94,7 +94,7 @@ async function parseMatchRequest(request: Request): Promise<{
   return {
     uploadId: String(body?.uploadId ?? "").trim(),
     genre: String(body?.genre ?? "").trim(),
-    discogsLabel: body?.discogsLabel?.trim() || null,
+    discogsLabel: String(body?.discogsLabel ?? "").trim() || null,
     instruments: parseInstrumentsField(body?.instruments),
   };
 }

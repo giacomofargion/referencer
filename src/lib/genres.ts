@@ -226,7 +226,7 @@ export function isInGenreNeighborhood(
 
   // Style token in the platform genre string (e.g. iTunes "Deep House").
   const style = discogsStyle(discogsLabel);
-  if (style && raw.toLowerCase().includes(style.toLowerCase())) return true;
+  if (style && textContainsToken(raw, style)) return true;
 
   return false;
 }

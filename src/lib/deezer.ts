@@ -35,8 +35,24 @@ async function fetchDeezer(url: string): Promise<Response> {
   });
 }
 
+/**
+ * Search previews are HTTPS on Deezer's CDN (typically cdns-preview-*.dzcdn.net).
+ * Reject anything else so we never fetch/store an untrusted preview URL.
+ */
+export function isApprovedDeezerPreviewUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === "dzcdn.net" || host.endsWith(".dzcdn.net");
+  } catch {
+    return false;
+  }
+}
+
 function normalizeHit(hit: DeezerSearchHit): PlatformTrack | null {
   if (!hit.id || !hit.title || !hit.preview || !hit.artist?.name) return null;
+  if (!isApprovedDeezerPreviewUrl(hit.preview)) return null;
   return {
     cacheKey: `deezer:${hit.id}`,
     deezerId: hit.id,

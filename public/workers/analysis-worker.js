@@ -414,17 +414,29 @@ function extractFeatures(essentia, left, right, sampleRate) {
   rightVector.delete();
 
   const peakDb = computeSamplePeakDb(left, right);
-  const integratedLoudness = loudness.integratedLoudness;
+  // LoudnessEBUR128 can yield non-finite values on silent/near-silent windows.
+  // Keep in sync with src/lib/extract-features.ts.
+  const rawIntegrated = loudness.integratedLoudness;
+  const integratedLoudness = Number.isFinite(rawIntegrated)
+    ? rawIntegrated
+    : -70; // EBU R128 absolute gate
+  const rawRange = loudness.loudnessRange;
+  const loudnessRangeDb = Number.isFinite(rawRange) ? rawRange : 0;
+  // Existing safe fallback when peak or integrated loudness is unusable.
+  const plrDb =
+    Number.isFinite(peakDb) && Number.isFinite(rawIntegrated)
+      ? peakDb - rawIntegrated
+      : 0;
   const frame = computeFrameDescriptors(essentia, mono, sampleRate);
   const beat = computeBeatHistogram(essentia, mono, sampleRate);
 
   return {
     integratedLoudnessLufs: integratedLoudness,
-    loudnessRangeDb: loudness.loudnessRange,
+    loudnessRangeDb,
     frequencyBandEnergies: frame.frequencyBandEnergies,
     tempoBpm: computeTempo(essentia, mono, sampleRate),
     stereoWidth: computeStereoWidth(left, right),
-    plrDb: Number.isFinite(peakDb) ? peakDb - integratedLoudness : 0,
+    plrDb,
     onsetRate: computeOnsetRate(essentia, mono, sampleRate),
     mfccMean: frame.mfccMean,
     mfccStd: frame.mfccStd,

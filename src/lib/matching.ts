@@ -1,4 +1,12 @@
-import { FREQUENCY_BANDS, type FeatureVector, type StoredFingerprint } from "@/lib/types";
+import {
+  BEAT_HIST_PEAKS,
+  FREQUENCY_BANDS,
+  HPCP_BINS,
+  MFCC_COEFFS,
+  SPECTRAL_CONTRAST_BANDS,
+  type FeatureVector,
+  type StoredFingerprint,
+} from "@/lib/types";
 import {
   getAggregateFeatures,
   getEmbedding,
@@ -162,47 +170,34 @@ function flattenFeatures(
     );
   }
 
-  const mfccMean = f.mfccMean;
-  if (mfccMean) {
-    for (const c of mfccMean) push(c, weights.timbre / 13);
-  } else {
-    for (let i = 0; i < 13; i++) push(undefined, weights.timbre / 13);
-  }
-  const mfccStd = f.mfccStd;
-  if (mfccStd) {
-    for (const c of mfccStd) push(c, (weights.timbre * 0.5) / 13);
-  } else {
-    for (let i = 0; i < 13; i++) push(undefined, (weights.timbre * 0.5) / 13);
-  }
+  // Fixed-arity slots so short/long arrays cannot shift later dimensions.
+  const pushSlots = (
+    arr: number[] | undefined,
+    length: number,
+    weight: number,
+  ) => {
+    for (let i = 0; i < length; i++) push(arr?.[i], weight);
+  };
+
+  pushSlots(f.mfccMean, MFCC_COEFFS, weights.timbre / MFCC_COEFFS);
+  pushSlots(f.mfccStd, MFCC_COEFFS, (weights.timbre * 0.5) / MFCC_COEFFS);
 
   push(f.spectralCentroid, weights.timbre);
   push(f.spectralRolloff, weights.timbre);
   push(f.spectralFlux, weights.rhythm);
   push(f.spectralFlatness, weights.timbre);
-  const contrast = f.spectralContrast;
-  if (contrast) {
-    for (const c of contrast) push(c, weights.timbre / contrast.length);
-  } else {
-    for (let i = 0; i < 6; i++) push(undefined, weights.timbre / 6);
-  }
+  pushSlots(
+    f.spectralContrast,
+    SPECTRAL_CONTRAST_BANDS,
+    weights.timbre / SPECTRAL_CONTRAST_BANDS,
+  );
   push(f.zeroCrossingRate, weights.rhythm);
 
-  const hpcp = f.hpcp;
-  if (hpcp) {
-    for (const c of hpcp) push(c, weights.chroma / hpcp.length);
-  } else {
-    for (let i = 0; i < 12; i++) push(undefined, weights.chroma / 12);
-  }
+  pushSlots(f.hpcp, HPCP_BINS, weights.chroma / HPCP_BINS);
 
-  const beatBpms = f.beatHistBpms;
-  const beatWts = f.beatHistWeights;
-  if (beatBpms && beatWts) {
-    for (let i = 0; i < 2; i++) {
-      push(beatBpms[i], weights.rhythm * 0.5);
-      push(beatWts[i], weights.rhythm * 0.5);
-    }
-  } else {
-    for (let i = 0; i < 4; i++) push(undefined, weights.rhythm * 0.5);
+  for (let i = 0; i < BEAT_HIST_PEAKS; i++) {
+    push(f.beatHistBpms?.[i], weights.rhythm * 0.5);
+    push(f.beatHistWeights?.[i], weights.rhythm * 0.5);
   }
 
   push(f.rmsMean, weights.dynamicsExt);
@@ -233,9 +228,18 @@ function zscoreRow(
   stats: Array<{ mean: number; std: number }>,
 ): number[] {
   return values.map((v, i) => {
-    const { mean, std } = stats[i];
     if (!Number.isFinite(v)) return 0; // missing → pool center
-    return (v - mean) / std;
+    const s = stats[i];
+    // Absent / malformed pool stats must not throw or yield NaN distances.
+    if (
+      !s ||
+      !Number.isFinite(s.mean) ||
+      !Number.isFinite(s.std) ||
+      s.std < 1e-9
+    ) {
+      return 0;
+    }
+    return (v - s.mean) / s.std;
   });
 }
 
@@ -308,17 +312,22 @@ function fingerprintDistance(
     const cFlat = flattenFeatures(cf, weights);
     const qz = zscoreRow(qFlat.values, poolStats);
     const cz = zscoreRow(cFlat.values, poolStats);
-    // Tempo uses octave-aware distance injected into the tempo slot (index 3).
+    // Tempo uses octave-aware distance as an explicit symmetric weighted term
+    // (left out of the vector metric — slot injection was asymmetric for cosine).
     const tempoIdx = 3;
-    const tDist =
-      tempoDistance(qf.tempoBpm, cf.tempoBpm) /
-      Math.max(poolStats[tempoIdx]?.std ?? 1, 1);
-    qz[tempoIdx] = 0;
-    cz[tempoIdx] = tDist;
+    const tempoTerm =
+      (dimWeights[tempoIdx] ?? 0) *
+      (tempoDistance(qf.tempoBpm, cf.tempoBpm) /
+        Math.max(poolStats[tempoIdx]?.std ?? 1, 1));
+    const qRest = qz.filter((_, i) => i !== tempoIdx);
+    const cRest = cz.filter((_, i) => i !== tempoIdx);
+    const wRest = dimWeights.filter((_, i) => i !== tempoIdx);
 
-    return metric === "cosine"
-      ? weightedCosineDistance(qz, cz, dimWeights)
-      : weightedEuclideanDistance(qz, cz, dimWeights);
+    const base =
+      metric === "cosine"
+        ? weightedCosineDistance(qRest, cRest, wRest)
+        : weightedEuclideanDistance(qRest, cRest, wRest);
+    return base + tempoTerm;
   };
 
   if (n <= 0) {
