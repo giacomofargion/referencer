@@ -29,6 +29,8 @@ const MAX_POOL = 60;
 const TOP_RESULTS = 8;
 const QUERIES_PER_SOURCE = 3;
 const RESULTS_PER_QUERY = 12;
+/** Leave headroom after hydrate for ranking + match inserts. */
+const HYDRATE_SAFETY_MARGIN_MS = 10_000;
 
 interface CachedReference {
   id: string;
@@ -92,6 +94,7 @@ async function parseMatchRequest(request: Request): Promise<{
  * No hosted MERT worker required.
  */
 export async function POST(request: Request) {
+  const requestStartedAt = Date.now();
   const { userId } = await auth();
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -170,6 +173,7 @@ export async function POST(request: Request) {
       platformHits,
       genre,
       discogsLabel,
+      requestStartedAt,
     );
     const byId = new Map(
       (
@@ -352,17 +356,24 @@ async function collectPlatformCandidates(
 /**
  * Resolve to iTunes ids for the existing reference_tracks cache key, analyze
  * previews (Deezer or iTunes URL), upsert features.
+ * Stops early when the request deadline is reached so ranking still has budget.
  */
 async function hydratePlatformTracks(
   hits: PlatformTrack[],
   fallbackGenre: MatchGenre,
   discogsLabel: string | null,
+  requestStartedAt: number,
 ): Promise<Array<{ itunesTrackId: number }>> {
   const ordered: Array<{ itunesTrackId: number }> = [];
   const seen = new Set<number>();
   let analyzed = 0;
+  const deadlineAt =
+    requestStartedAt + maxDuration * 1000 - HYDRATE_SAFETY_MARGIN_MS;
+
+  const pastDeadline = () => Date.now() >= deadlineAt;
 
   for (const hit of hits) {
+    if (pastDeadline()) break;
     if (analyzed >= MAX_HYDRATIONS && ordered.length >= TOP_RESULTS) break;
 
     let itunesId = hit.itunesTrackId;
@@ -375,6 +386,7 @@ async function hydratePlatformTracks(
     let itunesGenre = hit.genre || fallbackGenre;
 
     if (itunesId == null) {
+      if (pastDeadline()) break;
       const term = [hit.artist, hit.title].filter(Boolean).join(" ").trim();
       if (!term) continue;
       const itunesHits = await searchItunesSongs(term, 8).catch(() => []);
@@ -404,6 +416,8 @@ async function hydratePlatformTracks(
       continue;
     }
 
+    if (pastDeadline()) break;
+
     const existing = await sql`
       SELECT id, preview_start_sec FROM reference_tracks
       WHERE itunes_track_id = ${itunesId} AND feature_vector IS NOT NULL
@@ -412,6 +426,7 @@ async function hydratePlatformTracks(
 
     if (existing.length === 0 || existing[0].preview_start_sec == null) {
       if (analyzed >= MAX_HYDRATIONS) continue;
+      if (pastDeadline()) break;
       try {
         const { features, loudestStartSec } = await analyzePreviewUrl(previewUrl);
         await upsertReference(

@@ -13,15 +13,25 @@ MODEL_REMOTE="$(
   curl -fsSL "$DEMO" | python3 -c '
 import re, sys, urllib.request
 
+ORIGIN = "https://essentia.upf.edu"
 html = sys.stdin.read()
-scripts = re.findall(r"src=\"(/essentiajs-discogs/assets/[^\"]+)\"", html)
-scripts += re.findall(
+entry_scripts = re.findall(r"src=\"(/essentiajs-discogs/assets/[^\"]+)\"", html)
+entry_scripts += re.findall(
     r"src=\"(https://essentia\.upf\.edu/essentiajs-discogs/assets/[^\"]+)\"",
     html,
 )
+
+# Follow Vite-hashed imports from the entry bundle (model lives in a nested chunk).
+to_scan: list[str] = []
+seen: set[str] = set()
+for src in entry_scripts:
+    url = src if src.startswith("http") else f"{ORIGIN}{src}"
+    if url not in seen:
+        seen.add(url)
+        to_scan.append(url)
+
 found = None
-for src in scripts:
-    url = src if src.startswith("http") else f"https://essentia.upf.edu{src}"
+for url in to_scan:
     try:
         with urllib.request.urlopen(url, timeout=120) as resp:
             data = resp.read().decode("utf-8", "replace")
@@ -31,6 +41,12 @@ for src in scripts:
     if match:
         found = match.group(0)
         break
+    for name in re.findall(r"assets/([A-Za-z0-9._-]+\.js)", data):
+        nested = f"{ORIGIN}/essentiajs-discogs/assets/{name}"
+        if nested not in seen:
+            seen.add(nested)
+            to_scan.append(nested)
+
 if not found:
     raise SystemExit("Could not discover Discogs TF.js model.json from demo assets")
 print(found)
