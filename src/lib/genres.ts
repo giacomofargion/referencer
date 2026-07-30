@@ -179,12 +179,30 @@ export function instrumentsFromDiscogsLabel(
   return [];
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Match an alias/genre as a standalone token (not a substring of another word).
+ * Prevents e.g. "garage"/"industrial"/"fusion"/"pop" hitting inside unrelated words.
+ */
+function textContainsToken(haystack: string, token: string): boolean {
+  const needle = token.trim().toLowerCase();
+  if (!needle) return false;
+  const pattern = new RegExp(
+    `(^|[^a-z0-9])${escapeRegExp(needle)}([^a-z0-9]|$)`,
+    "i",
+  );
+  return pattern.test(haystack);
+}
+
 function textMatchesGenre(haystack: string, genre: MatchGenre): boolean {
   const lower = haystack.toLowerCase();
   if (!lower) return false;
-  if (lower.includes(genre.toLowerCase())) return true;
+  if (textContainsToken(lower, genre)) return true;
   for (const alias of GENRE_ALIASES[genre]) {
-    if (lower.includes(alias)) return true;
+    if (textContainsToken(lower, alias)) return true;
   }
   return false;
 }
@@ -266,11 +284,11 @@ export function genreDistancePenalty(
   const lower = raw.toLowerCase();
 
   const style = discogsStyle(discogsLabel);
-  if (style && lower.includes(style.toLowerCase())) return 0;
-  if (lower.includes(preferred.toLowerCase())) return 0;
+  if (style && textContainsToken(lower, style)) return 0;
+  if (textContainsToken(lower, preferred)) return 0;
 
   for (const alias of GENRE_ALIASES[preferred]) {
-    if (lower.includes(alias)) return 0.01;
+    if (textContainsToken(lower, alias)) return 0.01;
   }
   for (const related of relatedGenres(preferred)) {
     if (textMatchesGenre(raw, related)) return 0.04;

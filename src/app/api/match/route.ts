@@ -303,24 +303,17 @@ async function collectPlatformCandidates(
   const seen = new Set<string>();
 
   for (const query of queries) {
-    const deezer = await searchDeezerTracks(
-      query,
-      RESULTS_PER_QUERY,
-      genre,
-    ).catch((error) => {
-      console.warn("Deezer search failed:", error);
-      return [] as PlatformTrack[];
-    });
+    const deezer = await searchDeezerTracks(query, RESULTS_PER_QUERY).catch(
+      (error) => {
+        console.warn("Deezer search failed:", error);
+        return [] as PlatformTrack[];
+      },
+    );
     for (const track of deezer) {
       const key = `${track.artist.toLowerCase()}|${track.title.toLowerCase()}`;
       if (seen.has(key)) continue;
-      // Deezer often lacks genre; keep and rely on iTunes hydrate + hard gate.
-      if (
-        track.genre &&
-        !isInGenreNeighborhood(genre, track.genre, discogsLabel)
-      ) {
-        continue;
-      }
+      // Deezer stamps the requested genre as a placeholder — treat as unknown
+      // and let hydratePlatformTracks gate on the real iTunes genre.
       seen.add(key);
       merged.push(track);
     }

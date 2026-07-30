@@ -25,28 +25,17 @@ interface DeezerSearchHit {
   album?: { title?: string; cover_medium?: string; cover_big?: string };
 }
 
-const MIN_GAP_MS = 200;
-let lastRequestAt = 0;
-let queue: Promise<void> = Promise.resolve();
+const FETCH_TIMEOUT_MS = 8_000;
 
-async function throttledFetch(url: string): Promise<Response> {
-  const run = queue.then(async () => {
-    const wait = Math.max(0, MIN_GAP_MS - (Date.now() - lastRequestAt));
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    lastRequestAt = Date.now();
-    return fetch(url, {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
+async function fetchDeezer(url: string): Promise<Response> {
+  return fetch(url, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  queue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
 }
 
-function normalizeHit(hit: DeezerSearchHit, fallbackGenre: string): PlatformTrack | null {
+function normalizeHit(hit: DeezerSearchHit): PlatformTrack | null {
   if (!hit.id || !hit.title || !hit.preview || !hit.artist?.name) return null;
   return {
     cacheKey: `deezer:${hit.id}`,
@@ -56,7 +45,8 @@ function normalizeHit(hit: DeezerSearchHit, fallbackGenre: string): PlatformTrac
     artist: hit.artist.name,
     album: hit.album?.title ?? null,
     artworkUrl: hit.album?.cover_big ?? hit.album?.cover_medium ?? null,
-    genre: fallbackGenre,
+    // Search hits don't include genre — leave unknown for hydrate to resolve.
+    genre: "",
     previewUrl: hit.preview,
   };
 }
@@ -64,13 +54,12 @@ function normalizeHit(hit: DeezerSearchHit, fallbackGenre: string): PlatformTrac
 export async function searchDeezerTracks(
   term: string,
   limit = 15,
-  fallbackGenre = "Unknown",
 ): Promise<PlatformTrack[]> {
   const params = new URLSearchParams({
     q: term,
     limit: String(Math.max(1, Math.min(limit, 40))),
   });
-  const response = await throttledFetch(
+  const response = await fetchDeezer(
     `https://api.deezer.com/search?${params}`,
   );
   if (!response.ok) {
@@ -81,6 +70,6 @@ export async function searchDeezerTracks(
     throw new Error(`Deezer search error: ${data.error.message}`);
   }
   return (data.data ?? [])
-    .map((hit) => normalizeHit(hit, fallbackGenre))
+    .map((hit) => normalizeHit(hit))
     .filter((t): t is PlatformTrack => t !== null);
 }

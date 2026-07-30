@@ -1,15 +1,13 @@
-/* global Essentia, EssentiaModel, tf */
+/* global EssentiaModel, tf */
 /**
  * Discogs-EffNet genre tagging worker (classic worker).
  * Mel features via Essentia TensorflowInputMusiCNN; 400-class head via TF.js
  * GraphModel under /models/discogs-genre/ (see scripts/download-discogs-tfjs.sh).
  */
 
-let resolveRuntime;
-const runtimeReady = new Promise((resolve) => {
-  resolveRuntime = resolve;
-});
-self.Module = { onRuntimeInitialized: () => resolveRuntime() };
+const RUNTIME_TIMEOUT_MS = 20_000;
+
+// UMD wasm ends with `exports.EssentiaWASM = Module`; workers have no exports.
 self.exports = {};
 
 importScripts(
@@ -19,7 +17,52 @@ importScripts(
   "/essentia/essentia.js-model.umd.js",
 );
 
-if (self.Module.calledRun) resolveRuntime();
+function getEssentiaWasm() {
+  const wasm =
+    (self.exports && self.exports.EssentiaWASM) || self.EssentiaWASM || null;
+  if (!wasm) {
+    throw new Error("Essentia WASM module missing after importScripts");
+  }
+  return wasm;
+}
+
+/**
+ * Resolve once Emscripten has finished init (sync or async).
+ * Prefer the exported EssentiaWASM instance over a pre-seeded Module hook.
+ */
+function waitForEssentiaRuntime(wasm) {
+  if (wasm.calledRun) return Promise.resolve(wasm);
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("Essentia WASM initialization timed out"));
+    }, RUNTIME_TIMEOUT_MS);
+
+    const previous = wasm.onRuntimeInitialized;
+    wasm.onRuntimeInitialized = () => {
+      clearTimeout(timer);
+      try {
+        if (typeof previous === "function") previous();
+      } finally {
+        resolve(wasm);
+      }
+    };
+
+    // Init finished between the calledRun check and the hook install.
+    if (wasm.calledRun) {
+      clearTimeout(timer);
+      resolve(wasm);
+    }
+  });
+}
+
+const essentiaWasmReady = (() => {
+  try {
+    return waitForEssentiaRuntime(getEssentiaWasm());
+  } catch (error) {
+    return Promise.reject(error);
+  }
+})();
 
 const MODEL_URL = "/models/discogs-genre/model.json";
 const LABELS_URL = "/models/discogs-genre/labels.json";
@@ -40,11 +83,14 @@ function loadModel() {
 
 function loadLabels() {
   if (!labelsPromise) {
-    labelsPromise = fetch(LABELS_URL)
-      .then((r) => {
-        if (!r.ok) throw new Error("Discogs labels missing — run scripts/download-discogs-tfjs.sh");
-        return r.json();
-      });
+    labelsPromise = fetch(LABELS_URL).then((r) => {
+      if (!r.ok) {
+        throw new Error(
+          "Discogs labels missing — run scripts/download-discogs-tfjs.sh",
+        );
+      }
+      return r.json();
+    });
   }
   return labelsPromise;
 }
@@ -91,12 +137,12 @@ function topK(activations, labels, k) {
 }
 
 async function classify(mono, sampleRate) {
-  await runtimeReady;
+  const EssentiaWASM = await essentiaWasmReady;
   const [model, labels] = await Promise.all([loadModel(), loadLabels()]);
 
   const audio = centerSlice(downsampleTo16k(mono, sampleRate), TARGET_SR);
   const extractor = new EssentiaModel.EssentiaTFInputExtractor(
-    self.Module,
+    EssentiaWASM,
     "musicnn",
     false,
   );
