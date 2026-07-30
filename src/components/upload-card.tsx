@@ -17,7 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { openBuyCreditsDialog } from "@/components/credits-balance";
+import { notifyCreditsUpdated, openBuyCreditsDialog } from "@/components/credits-balance";
 import { useAuthedFetch } from "@/hooks/use-authed-fetch";
 import { readApiJson, usePromptSignIn } from "@/hooks/use-prompt-sign-in";
 import { analyzeAudioFile } from "@/lib/analysis";
@@ -30,12 +30,14 @@ import {
   isMatchGenre,
   type MatchGenre,
 } from "@/lib/genres";
+import { getAggregateFeatures } from "@/lib/feature-vector";
+import { groupAbsDeltas } from "@/lib/feedback-deltas";
 import {
   rankBySonicSimilarity,
   type WeightPreset,
 } from "@/lib/matching";
 import { fadeInUp } from "@/lib/motion";
-import type { FeatureVector } from "@/lib/types";
+import type { FeatureFingerprint } from "@/lib/types";
 
 type Phase =
   | { step: "idle" }
@@ -46,7 +48,7 @@ type Phase =
       step: "done";
       uploadId: string;
       projectId: string | null;
-      featureVector: FeatureVector;
+      featureVector: FeatureFingerprint;
       matches: MatchResult[];
       discoveryNote: string | null;
     };
@@ -142,13 +144,16 @@ export function UploadCard() {
       setActiveIndex(0);
       setLightboxOpen(false);
 
-      // Discogs-EffNet in the browser — drives Deezer/iTunes search terms.
+      // Discogs-EffNet in the browser — drives Deezer/iTunes search terms
+      // and optionally yields a 512-d penultimate embedding for ranking.
       let discogsLabel: string | null = null;
+      let discogsEmbedding: number[] | undefined;
       let genre: MatchGenre | null =
         genreOverride && isMatchGenre(genreOverride) ? genreOverride : null;
       try {
         const tagged = await classifyDiscogsGenre(file);
         discogsLabel = tagged.discogsLabel;
+        discogsEmbedding = tagged.embedding;
         setDetectedLabel(tagged.discogsLabel);
         const mapped = tagged.discogsLabel
           ? discogsLabelToGenre(tagged.discogsLabel)
@@ -168,6 +173,9 @@ export function UploadCard() {
       }
 
       const featureVector = await analyzeAudioFile(file);
+      if (discogsEmbedding) {
+        featureVector.embedding = discogsEmbedding;
+      }
 
       const clip = await encodeClipMp3(file).catch(() => {
         throw new Error("Couldn't prepare the audio clip");
@@ -199,14 +207,21 @@ export function UploadCard() {
       const { uploadId, uploadUrl } = created.data;
       const sessionProjectId = created.data.projectId ?? projectId;
 
-      // R2 may not be configured yet — analysis + matching still work.
+      // R2 may not be configured / CORS may block localhost — matching still works.
       if (uploadUrl) {
-        const putResponse = await fetch(uploadUrl, {
-          method: "PUT",
-          headers: { "Content-Type": "audio/mpeg" },
-          body: clip,
-        });
-        if (!putResponse.ok) {
+        try {
+          const putResponse = await fetch(uploadUrl, {
+            method: "PUT",
+            headers: { "Content-Type": "audio/mpeg" },
+            body: clip,
+          });
+          if (!putResponse.ok) {
+            toast.message(
+              "Couldn’t store the clip in R2 — matching continues with local playback.",
+            );
+          }
+        } catch {
+          // CORS / network errors throw instead of returning a response.
           toast.message(
             "Couldn’t store the clip in R2 — matching continues with local playback.",
           );
@@ -246,6 +261,7 @@ export function UploadCard() {
         matches: MatchResult[];
         projectId?: string | null;
         discoveryNote: string | null;
+        creditsRemaining?: number;
       }>(matchResponse);
       if (!matched.ok) {
         if (matched.unauthenticated) {
@@ -257,6 +273,7 @@ export function UploadCard() {
           matched.status === 402 ||
           matched.code === "INSUFFICIENT_CREDITS"
         ) {
+          notifyCreditsUpdated(0);
           toast.error(matched.error || "You’re out of credits", {
             action: {
               label: "Buy credits",
@@ -266,9 +283,16 @@ export function UploadCard() {
           setPhase({ step: "idle" });
           return;
         }
+        // Discovery failures refund the credit — refresh the header count.
+        notifyCreditsUpdated();
         throw new Error(matched.error);
       }
       const result = matched.data;
+      if (typeof result.creditsRemaining === "number") {
+        notifyCreditsUpdated(result.creditsRemaining);
+      } else {
+        notifyCreditsUpdated();
+      }
 
       setPhase({
         step: "done",
@@ -443,24 +467,30 @@ export function UploadCard() {
               </div>
               {authLoaded && !isSignedIn ? (
                 <p className="text-xs text-text-muted">
-                  Sign in to run the search — new accounts get 2 free credits.
+                  Sign in to run the search — new accounts get 5 free credits.
                 </p>
               ) : null}
             </div>
 
-            {phase.step === "done" && (
+            {phase.step === "done" && (() => {
+              const agg = getAggregateFeatures(phase.featureVector);
+              return (
               <p className="font-mono text-xs text-text-secondary">
-                {phase.featureVector.integratedLoudnessLufs.toFixed(1)} LUFS ·{" "}
-                {phase.featureVector.loudnessRangeDb.toFixed(1)} LU range
-                {typeof phase.featureVector.plrDb === "number"
-                  ? ` · ${phase.featureVector.plrDb.toFixed(1)} dB PLR`
+                {agg.integratedLoudnessLufs.toFixed(1)} LUFS ·{" "}
+                {agg.loudnessRangeDb.toFixed(1)} LU range
+                {typeof agg.plrDb === "number"
+                  ? ` · ${agg.plrDb.toFixed(1)} dB PLR`
                   : ""}{" "}
-                · {Math.round(phase.featureVector.tempoBpm)} BPM
-                {typeof phase.featureVector.onsetRate === "number"
-                  ? ` · ${phase.featureVector.onsetRate.toFixed(1)} onsets/s`
+                · {Math.round(agg.tempoBpm)} BPM
+                {typeof agg.onsetRate === "number"
+                  ? ` · ${agg.onsetRate.toFixed(1)} onsets/s`
+                  : ""}
+                {phase.featureVector.windows.length > 1
+                  ? ` · ${phase.featureVector.windows.length} sections`
                   : ""}
               </p>
-            )}
+              );
+            })()}
 
             <div className="flex gap-4 text-xs">
               <span className="flex items-center gap-1.5 text-text-secondary">
@@ -504,7 +534,7 @@ export function UploadCard() {
             matches={displayedMatches}
             activeIndex={safeActiveIndex}
             onActiveIndexChange={setActiveIndex}
-            clientFeatures={phase.featureVector}
+            clientFeatures={getAggregateFeatures(phase.featureVector)}
             clientPlaybackUrl={clientPlaybackUrl}
             weightPreset={weightPreset}
             onWeightPresetChange={(preset) => {
@@ -512,6 +542,28 @@ export function UploadCard() {
               setActiveIndex(0);
             }}
             discoveryNote={phase.discoveryNote}
+            onActiveMatchEngage={(match, rank) => {
+              if (rank < 2 || phase.step !== "done") return;
+              const top = displayedMatches[0];
+              if (!top) return;
+              const client = getAggregateFeatures(phase.featureVector);
+              void authedFetch("/api/match/feedback", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  uploadId: phase.uploadId,
+                  chosenReferenceId: match.id,
+                  shownOrder: displayedMatches.length,
+                  chosenRank: rank,
+                  groupDeltas: {
+                    chosen: groupAbsDeltas(client, match.featureVector),
+                    top: groupAbsDeltas(client, top.featureVector),
+                  },
+                }),
+              }).catch(() => {
+                /* feedback is best-effort */
+              });
+            }}
             renderSaveControl={(match) => (
               <SaveReferenceButton
                 referenceTrackId={match.id}
@@ -546,3 +598,4 @@ export function UploadCard() {
     </div>
   );
 }
+

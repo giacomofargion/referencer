@@ -1,4 +1,6 @@
 import { FREQUENCY_BANDS, type FeatureVector } from "@/lib/types";
+import { getAggregateFeatures } from "@/lib/feature-vector";
+import type { StoredFingerprint } from "@/lib/types";
 
 const BAND_LABELS: Record<(typeof FREQUENCY_BANDS)[number]["name"], string> = {
   sub: "sub-bass",
@@ -10,14 +12,22 @@ const BAND_LABELS: Record<(typeof FREQUENCY_BANDS)[number]["name"], string> = {
   air: "air/top end",
 };
 
+function asFeatures(
+  value: FeatureVector | StoredFingerprint,
+): FeatureVector {
+  return getAggregateFeatures(value as StoredFingerprint);
+}
+
 /**
  * Deterministic plain-English explanation from feature deltas —
  * no LLM call, so it's free and fast.
  */
 export function explainMatch(
-  client: FeatureVector,
-  reference: FeatureVector,
+  clientInput: FeatureVector | StoredFingerprint,
+  referenceInput: FeatureVector | StoredFingerprint,
 ): string {
+  const client = asFeatures(clientInput);
+  const reference = asFeatures(referenceInput);
   const parts: string[] = [];
 
   const tempoDelta = Math.abs(client.tempoBpm - reference.tempoBpm);
@@ -94,6 +104,20 @@ export function explainMatch(
     }
   }
 
+  if (
+    typeof client.spectralCentroid === "number" &&
+    typeof reference.spectralCentroid === "number"
+  ) {
+    const brightDelta = reference.spectralCentroid - client.spectralCentroid;
+    if (Math.abs(brightDelta) > 400) {
+      parts.push(
+        brightDelta > 0
+          ? "brighter overall tone"
+          : "darker overall tone",
+      );
+    }
+  }
+
   const bandNotes = similarBands(client, reference);
   if (bandNotes.length > 0) {
     parts.push(`similar ${bandNotes.join(" and ")}`);
@@ -112,7 +136,6 @@ export function explainMatch(
     return "Closest overall sonic match in the current reference pool.";
   }
 
-  // Capitalize first clause, join the rest.
   const [first, ...rest] = parts;
   const sentence =
     first.charAt(0).toUpperCase() +
@@ -135,7 +158,6 @@ function similarBands(client: FeatureVector, reference: FeatureVector): string[]
       2,
   }));
 
-  // Highlight bands that both carry weight and match closely.
   return deltas
     .filter((d) => d.delta < 0.04 && d.energy > 0.05)
     .sort((a, b) => b.energy - a.energy)

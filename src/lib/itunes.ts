@@ -92,3 +92,37 @@ export async function searchItunesSongs(
     .map(normalizeSearchResult)
     .filter((t): t is ItunesTrack => t !== null);
 }
+
+/**
+ * Batch lookup by iTunes track id. Used to refresh stable preview URLs when
+ * cached Deezer CDN links have expired (~15 min `hdnea` tokens).
+ */
+export async function lookupItunesTracks(
+  trackIds: number[],
+): Promise<Map<number, ItunesTrack>> {
+  const unique = [
+    ...new Set(trackIds.filter((id) => Number.isFinite(id) && id > 0)),
+  ];
+  const out = new Map<number, ItunesTrack>();
+  if (unique.length === 0) return out;
+
+  for (let i = 0; i < unique.length; i += 20) {
+    const batch = unique.slice(i, i + 20);
+    const response = await fetch(
+      `https://itunes.apple.com/lookup?id=${batch.join(",")}`,
+      { headers: { Accept: "application/json" }, next: { revalidate: 0 } },
+    );
+    if (!response.ok) continue;
+    const data = (await response.json()) as { results?: ItunesSearchResult[] };
+    for (const item of data.results ?? []) {
+      const track = normalizeSearchResult(item);
+      if (track) out.set(track.itunesTrackId, track);
+    }
+  }
+  return out;
+}
+
+/** Deezer CDN previews use short-lived `hdnea` tokens (~15 min). */
+export function isEphemeralPreviewUrl(url: string): boolean {
+  return /dzcdn\.net|hdnea=/i.test(url);
+}

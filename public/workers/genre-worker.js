@@ -170,19 +170,67 @@ async function classify(mono, sampleRate) {
     throw new Error("No mel patches for Discogs genre model");
   }
 
-  const predRows = await tf.tidy(() => {
+  // Penultimate flatten is 512-d (before MatMul → 400 classes). Average across
+  // mel patches and L2-normalize for a free embedding from the same forward pass.
+  const EMBED_CANDIDATES = [
+    "PartitionedCall/flatten/Reshape",
+    "PartitionedCall/flatten/Reshape:0",
+  ];
+  const ACTIVATION_CANDIDATES = ["Identity", "Identity:0", "activations"];
+
+  const { predRows, embedRows } = await tf.tidy(() => {
     const input = tf.tensor3d(patches); // [N, 128, 96]
-    const out = model.execute({ melspectrogram: input });
-    const tensor = Array.isArray(out) ? out[0] : out;
-    return tensor.arraySync();
+    let activations = null;
+    let embeddings = null;
+
+    for (const embedName of EMBED_CANDIDATES) {
+      for (const actName of ACTIVATION_CANDIDATES) {
+        try {
+          const outs = model.execute(
+            { melspectrogram: input },
+            [actName, embedName],
+          );
+          const list = Array.isArray(outs) ? outs : [outs];
+          activations = list[0];
+          embeddings = list[1] ?? null;
+          break;
+        } catch {
+          /* try next name pair */
+        }
+      }
+      if (activations) break;
+    }
+
+    if (!activations) {
+      activations = model.execute({ melspectrogram: input });
+      if (Array.isArray(activations)) activations = activations[0];
+    }
+
+    return {
+      predRows: activations.arraySync(),
+      embedRows: embeddings ? embeddings.arraySync() : null,
+    };
   });
 
   const mean = averagePredictions(predRows);
   const top = topK(mean, labels, 5);
+
+  let embedding = null;
+  if (Array.isArray(embedRows) && embedRows.length > 0) {
+    const meanEmbed = averagePredictions(embedRows);
+    let norm = 0;
+    for (let i = 0; i < meanEmbed.length; i++) norm += meanEmbed[i] * meanEmbed[i];
+    norm = Math.sqrt(norm);
+    if (norm > 1e-12) {
+      embedding = Array.from(meanEmbed, (v) => v / norm);
+    }
+  }
+
   return {
     discogsLabel: top[0]?.label ?? null,
     confidence: top[0]?.score ?? 0,
     topDiscogs: top,
+    embedding,
   };
 }
 

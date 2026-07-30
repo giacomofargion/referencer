@@ -6,8 +6,12 @@ import { AppHeader } from "@/components/app-header";
 import { PageShell } from "@/components/page-shell";
 import { SessionResults } from "@/components/session-results";
 import { sql } from "@/lib/db";
-import { isFeatureVector } from "@/lib/feature-vector";
-import type { FeatureVector } from "@/lib/types";
+import {
+  getAggregateFeatures,
+  isStoredFingerprint,
+} from "@/lib/feature-vector";
+import { refreshEphemeralPreviewUrls } from "@/lib/refresh-previews";
+import type { StoredFingerprint } from "@/lib/types";
 
 type PageProps = { params: Promise<{ uploadId: string }> };
 
@@ -32,8 +36,9 @@ export default async function SessionPage({ params }: PageProps) {
   if (uploads.length === 0) notFound();
 
   const upload = uploads[0];
-  const clientFeatures = upload.feature_vector as FeatureVector | null;
-  if (!isFeatureVector(clientFeatures)) notFound();
+  const stored = upload.feature_vector as StoredFingerprint | null;
+  if (!isStoredFingerprint(stored)) notFound();
+  const clientFeatures = getAggregateFeatures(stored);
 
   const projectId = (upload.project_id as string | null) ?? null;
 
@@ -72,7 +77,7 @@ export default async function SessionPage({ params }: PageProps) {
 
   const matches = [];
   for (const row of matchRows) {
-    if (!isFeatureVector(row.feature_vector)) continue;
+    if (!isStoredFingerprint(row.feature_vector)) continue;
     const id = row.id as string;
     matches.push({
       id,
@@ -87,10 +92,14 @@ export default async function SessionPage({ params }: PageProps) {
         row.preview_start_sec == null ? null : Number(row.preview_start_sec),
       distanceScore: Number(row.distance_score),
       explanation: row.explanation_text as string,
-      featureVector: row.feature_vector,
+      featureVector: getAggregateFeatures(
+        row.feature_vector as StoredFingerprint,
+      ),
       saved: savedIds.has(id),
     });
   }
+
+  await refreshEphemeralPreviewUrls(matches);
 
   return (
     <>

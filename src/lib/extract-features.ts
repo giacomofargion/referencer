@@ -1,52 +1,45 @@
-/* global Essentia */
-/**
- * Audio analysis worker (classic worker, not a module).
- * Loads the Essentia WASM backend from /public and computes a multi-window
- * FeatureFingerprint off the main thread. Kept as plain JS because it uses
- * importScripts and UMD globals, which bundlers handle badly.
- *
- * Keep algorithms in sync with src/lib/extract-features.ts.
- */
+import { Essentia, EssentiaWASM } from "essentia.js";
 
-// The UMD build's Emscripten runtime initializes asynchronously; hook the
-// callback before importScripts so we never race it.
-let resolveRuntime;
-const runtimeReady = new Promise((resolve) => {
-  resolveRuntime = resolve;
-});
-self.Module = { onRuntimeInitialized: () => resolveRuntime() };
-// The UMD build ends with `exports.EssentiaWASM = Module`, and workers
-// have no `exports` global — provide one so the assignment doesn't throw.
-self.exports = {};
+import { buildFingerprint } from "@/lib/feature-vector";
+import {
+  DEFAULT_LOUDEST_WINDOW_SECONDS,
+  findLoudestWindowStartSeconds,
+  mixToMono,
+} from "@/lib/loudest-window";
+import {
+  BEAT_HIST_PEAKS,
+  HPCP_BINS,
+  MFCC_COEFFS,
+  SPECTRAL_CONTRAST_BANDS,
+  type FeatureFingerprint,
+  type FeatureVector,
+} from "@/lib/types";
 
-importScripts(
-  "/essentia/essentia-wasm.umd.js",
-  "/essentia/essentia.js-core.js",
-);
-
-if (self.Module.calledRun) resolveRuntime();
-
-// Must match FREQUENCY_BANDS / extract-features.ts / server analysis.
+// Keep in sync with public/workers/analysis-worker.js
 const BAND_EDGES = [20, 60, 250, 500, 2000, 4000, 8000, 20000];
 const FRAME_SIZE = 4096;
 const HOP_SIZE = 2048;
-// Client can afford a longer tempo slice than the server (30s) — full tracks.
-const TEMPO_SLICE_SECONDS = 60;
+const TEMPO_SLICE_SECONDS = 30;
 const MIN_WINDOW_SECONDS = 8;
 const TARGET_WINDOW_SECONDS = 20;
 const MAX_WINDOWS = 5;
-const MFCC_COEFFS = 13;
-const HPCP_BINS = 12;
-const SPECTRAL_CONTRAST_BANDS = 6;
-const BEAT_HIST_PEAKS = 2;
 
-const essentiaReady = runtimeReady.then(() => new Essentia(self.Module));
+type EssentiaInstance = InstanceType<typeof Essentia>;
 
-function safeDelete(obj) {
+let essentiaSingleton: EssentiaInstance | null = null;
+
+function getEssentia(): EssentiaInstance {
+  if (!essentiaSingleton) {
+    essentiaSingleton = new Essentia(EssentiaWASM);
+  }
+  return essentiaSingleton;
+}
+
+function safeDelete(obj: { delete?: () => void } | null | undefined) {
   if (obj && typeof obj.delete === "function") obj.delete();
 }
 
-function meanStd(values) {
+function meanStd(values: number[]): { mean: number; std: number } {
   if (values.length === 0) return { mean: 0, std: 0 };
   let sum = 0;
   for (const v of values) sum += v;
@@ -59,11 +52,11 @@ function meanStd(values) {
   return { mean, std: Math.sqrt(varSum / values.length) };
 }
 
-function columnMeanStd(rows, fallbackDim) {
+function columnMeanStd(rows: number[][]): { mean: number[]; std: number[] } {
   if (rows.length === 0) {
     return {
-      mean: new Array(fallbackDim).fill(0),
-      std: new Array(fallbackDim).fill(0),
+      mean: new Array(MFCC_COEFFS).fill(0),
+      std: new Array(MFCC_COEFFS).fill(0),
     };
   }
   const dim = rows[0].length;
@@ -83,7 +76,7 @@ function columnMeanStd(rows, fallbackDim) {
   return { mean, std };
 }
 
-function computeStereoWidth(left, right) {
+function computeStereoWidth(left: Float32Array, right: Float32Array): number {
   let midEnergy = 0;
   let sideEnergy = 0;
   for (let i = 0; i < left.length; i++) {
@@ -96,7 +89,7 @@ function computeStereoWidth(left, right) {
   return total === 0 ? 0 : sideEnergy / total;
 }
 
-function computeSamplePeakDb(left, right) {
+function computeSamplePeakDb(left: Float32Array, right: Float32Array): number {
   let peak = 0;
   for (let i = 0; i < left.length; i++) {
     const l = Math.abs(left[i]);
@@ -107,23 +100,34 @@ function computeSamplePeakDb(left, right) {
   return peak === 0 ? -Infinity : 20 * Math.log10(peak);
 }
 
-function centerSlice(mono, sampleRate, seconds) {
+function centerSlice(
+  mono: Float32Array,
+  sampleRate: number,
+  seconds: number,
+): Float32Array {
   const sliceLength = Math.min(mono.length, Math.floor(seconds * sampleRate));
   const start = Math.max(0, Math.floor((mono.length - sliceLength) / 2));
   return mono.subarray(start, start + sliceLength);
 }
 
-function computeOnsetRate(essentia, mono, sampleRate) {
+function computeOnsetRate(
+  essentia: EssentiaInstance,
+  mono: Float32Array,
+  sampleRate: number,
+): number {
   const slice = centerSlice(mono, sampleRate, TEMPO_SLICE_SECONDS);
   const sliceVector = essentia.arrayToVector(slice);
   const result = essentia.OnsetRate(sliceVector);
   sliceVector.delete();
   safeDelete(result.onsets);
-  // OnsetRate assumes 44.1 kHz internally; rescale for other rates.
   return result.onsetRate * (sampleRate / 44100);
 }
 
-function computeTempo(essentia, mono, sampleRate) {
+function computeTempo(
+  essentia: EssentiaInstance,
+  mono: Float32Array,
+  sampleRate: number,
+): number {
   const slice = centerSlice(mono, sampleRate, TEMPO_SLICE_SECONDS);
   const sliceVector = essentia.arrayToVector(slice);
   const result = essentia.PercivalBpmEstimator(
@@ -137,16 +141,19 @@ function computeTempo(essentia, mono, sampleRate) {
     sampleRate,
   );
   sliceVector.delete();
-  return result.bpm;
+  return result.bpm as number;
 }
 
-function computeBeatHistogram(essentia, mono, sampleRate) {
+function computeBeatHistogram(
+  essentia: EssentiaInstance,
+  mono: Float32Array,
+  sampleRate: number,
+): { bpms: number[]; weights: number[] } {
   const zeros = {
     bpms: new Array(BEAT_HIST_PEAKS).fill(0),
     weights: new Array(BEAT_HIST_PEAKS).fill(0),
   };
   try {
-    // Cap at 20s — RhythmDescriptors is heavy; min(TEMPO_SLICE, 20).
     const slice = centerSlice(
       mono,
       sampleRate,
@@ -177,37 +184,54 @@ function computeBeatHistogram(essentia, mono, sampleRate) {
 
 /**
  * Single-pass frame loop: bands, MFCC, spectral descriptors, HPCP, RMS, ZCR.
- * FrameGenerator frames are owned by the generator — only delete Windowing /
- * Spectrum (and algorithm-owned vectors) per frame, matching extract-features.ts.
  */
-function computeFrameDescriptors(essentia, mono, sampleRate) {
+function computeFrameDescriptors(
+  essentia: EssentiaInstance,
+  mono: Float32Array,
+  sampleRate: number,
+): {
+  frequencyBandEnergies: number[];
+  mfccMean: number[];
+  mfccStd: number[];
+  spectralCentroid: number;
+  spectralRolloff: number;
+  spectralFlux: number;
+  spectralFlatness: number;
+  spectralContrast: number[];
+  zeroCrossingRate: number;
+  hpcp: number[];
+  rmsMean: number;
+  rmsStd: number;
+  crestFactor: number;
+  dynamicComplexity: number;
+} {
   const nyquist = sampleRate / 2;
   const bandSums = new Array(BAND_EDGES.length - 1).fill(0);
-  const mfccRows = [];
-  const centroids = [];
-  const rolloffs = [];
-  const fluxes = [];
-  const flatnesses = [];
-  const contrastRows = [];
-  const zcrs = [];
+  const mfccRows: number[][] = [];
+  const centroids: number[] = [];
+  const rolloffs: number[] = [];
+  const fluxes: number[] = [];
+  const flatnesses: number[] = [];
+  const contrastRows: number[][] = [];
+  const zcrs: number[] = [];
   const hpcpSums = new Array(HPCP_BINS).fill(0);
   let hpcpCount = 0;
-  const rmsValues = [];
-  const crests = [];
+  const rmsValues: number[] = [];
+  const crests: number[] = [];
 
-  let prevSpectrum = null;
+  let prevSpectrum: Float32Array | null = null;
   const frames = essentia.FrameGenerator(mono, FRAME_SIZE, HOP_SIZE);
-  const frameCount = frames.size();
+  const frameCount = frames.size() as number;
   const spectrumSize = FRAME_SIZE / 2 + 1;
 
   for (let i = 0; i < frameCount; i++) {
     const frame = frames.get(i);
 
     const rms = essentia.RMS(frame);
-    rmsValues.push(rms.rms);
+    rmsValues.push(rms.rms as number);
 
     const zcr = essentia.ZeroCrossingRate(frame);
-    zcrs.push(zcr.zeroCrossingRate);
+    zcrs.push(zcr.zeroCrossingRate as number);
 
     const windowed = essentia.Windowing(frame, true, FRAME_SIZE, "hann");
     const spectrum = essentia.Spectrum(windowed.frame, FRAME_SIZE);
@@ -217,14 +241,13 @@ function computeFrameDescriptors(essentia, mono, sampleRate) {
       const low = BAND_EDGES[b];
       const high = Math.min(BAND_EDGES[b + 1], nyquist);
       if (low >= nyquist) break;
-      // FrequencyBands UMD wrapper is buggy; EnergyBand per band instead.
       const band = essentia.EnergyBand(
         spectrum.spectrum,
         sampleRate,
         low,
         high,
       );
-      bandSums[b] += band.energyBand;
+      bandSums[b] += band.energyBand as number;
     }
 
     try {
@@ -255,28 +278,28 @@ function computeFrameDescriptors(essentia, mono, sampleRate) {
 
     try {
       const centroid = essentia.Centroid(spectrum.spectrum, nyquist);
-      centroids.push(centroid.centroid);
+      centroids.push(centroid.centroid as number);
     } catch {
       /* skip */
     }
 
     try {
       const rolloff = essentia.RollOff(spectrum.spectrum, 0.85, sampleRate);
-      rolloffs.push(rolloff.rollOff);
+      rolloffs.push(rolloff.rollOff as number);
     } catch {
       /* skip */
     }
 
     try {
       const flat = essentia.Flatness(spectrum.spectrum);
-      flatnesses.push(flat.flatness);
+      flatnesses.push(flat.flatness as number);
     } catch {
       /* skip */
     }
 
     try {
       const crest = essentia.Crest(spectrum.spectrum);
-      crests.push(crest.crest);
+      crests.push(crest.crest as number);
     } catch {
       /* skip */
     }
@@ -356,16 +379,17 @@ function computeFrameDescriptors(essentia, mono, sampleRate) {
   }
   frames.delete();
 
-  const bandTotal = bandSums.reduce((a, v) => a + v, 0);
+  const bandTotal = bandSums.reduce((a: number, v: number) => a + v, 0);
   const frequencyBandEnergies =
-    bandTotal === 0 ? bandSums : bandSums.map((v) => v / bandTotal);
+    bandTotal === 0
+      ? bandSums
+      : bandSums.map((v: number) => v / bandTotal);
 
-  const mfccStats = columnMeanStd(mfccRows, MFCC_COEFFS);
+  const mfccStats = columnMeanStd(mfccRows);
   const contrastStats = columnMeanStd(
     contrastRows.length > 0
       ? contrastRows
       : [new Array(SPECTRAL_CONTRAST_BANDS).fill(0)],
-    SPECTRAL_CONTRAST_BANDS,
   );
   const rmsStats = meanStd(rmsValues);
   const dynamicComplexity =
@@ -374,7 +398,7 @@ function computeFrameDescriptors(essentia, mono, sampleRate) {
   const hpcp =
     hpcpCount === 0
       ? new Array(HPCP_BINS).fill(0)
-      : hpcpSums.map((v) => v / hpcpCount);
+      : hpcpSums.map((v: number) => v / hpcpCount);
 
   return {
     frequencyBandEnergies,
@@ -395,7 +419,12 @@ function computeFrameDescriptors(essentia, mono, sampleRate) {
 }
 
 /** Extract a full FeatureVector from decoded stereo channels. */
-function extractFeatures(essentia, left, right, sampleRate) {
+export function extractFeatures(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+): FeatureVector {
+  const essentia = getEssentia();
   const leftVector = essentia.arrayToVector(left);
   const rightVector = essentia.arrayToVector(right);
 
@@ -414,13 +443,13 @@ function extractFeatures(essentia, left, right, sampleRate) {
   rightVector.delete();
 
   const peakDb = computeSamplePeakDb(left, right);
-  const integratedLoudness = loudness.integratedLoudness;
+  const integratedLoudness = loudness.integratedLoudness as number;
   const frame = computeFrameDescriptors(essentia, mono, sampleRate);
   const beat = computeBeatHistogram(essentia, mono, sampleRate);
 
   return {
     integratedLoudnessLufs: integratedLoudness,
-    loudnessRangeDb: loudness.loudnessRange,
+    loudnessRangeDb: loudness.loudnessRange as number,
     frequencyBandEnergies: frame.frequencyBandEnergies,
     tempoBpm: computeTempo(essentia, mono, sampleRate),
     stereoWidth: computeStereoWidth(left, right),
@@ -448,7 +477,9 @@ function extractFeatures(essentia, left, right, sampleRate) {
  * How many equal sections to analyze: up to 5, each at least ~8s when possible.
  * Short previews collapse to 1–2 windows instead of forcing empty slices.
  */
-function planAnalysisWindows(durationSec) {
+export function planAnalysisWindows(
+  durationSec: number,
+): { count: number; windowSec: number } {
   if (durationSec <= MIN_WINDOW_SECONDS * 1.5) {
     return { count: 1, windowSec: durationSec };
   }
@@ -461,68 +492,18 @@ function planAnalysisWindows(durationSec) {
   return { count, windowSec: durationSec / count };
 }
 
-/** Mean-aggregate window vectors (mirrors buildFingerprint / aggregateFeatureVectors). */
-function aggregateFeatureVectors(windows) {
-  if (windows.length === 0) {
-    throw new Error("Cannot aggregate empty feature windows");
-  }
-  if (windows.length === 1) return windows[0];
-
-  const n = windows.length;
-  const meanScalar = (pick) =>
-    windows.reduce((s, w) => s + pick(w), 0) / n;
-  const meanArray = (pick, length) => {
-    const out = new Array(length).fill(0);
-    for (const w of windows) {
-      const row = pick(w);
-      for (let i = 0; i < length; i++) out[i] += row[i];
-    }
-    return out.map((v) => v / n);
-  };
-
-  return {
-    integratedLoudnessLufs: meanScalar((w) => w.integratedLoudnessLufs),
-    loudnessRangeDb: meanScalar((w) => w.loudnessRangeDb),
-    frequencyBandEnergies: meanArray((w) => w.frequencyBandEnergies, 7),
-    tempoBpm: meanScalar((w) => w.tempoBpm),
-    stereoWidth: meanScalar((w) => w.stereoWidth),
-    plrDb: meanScalar((w) => w.plrDb),
-    onsetRate: meanScalar((w) => w.onsetRate),
-    mfccMean: meanArray((w) => w.mfccMean, MFCC_COEFFS),
-    mfccStd: meanArray((w) => w.mfccStd, MFCC_COEFFS),
-    spectralCentroid: meanScalar((w) => w.spectralCentroid),
-    spectralRolloff: meanScalar((w) => w.spectralRolloff),
-    spectralFlux: meanScalar((w) => w.spectralFlux),
-    spectralFlatness: meanScalar((w) => w.spectralFlatness),
-    spectralContrast: meanArray(
-      (w) => w.spectralContrast,
-      SPECTRAL_CONTRAST_BANDS,
-    ),
-    zeroCrossingRate: meanScalar((w) => w.zeroCrossingRate),
-    hpcp: meanArray((w) => w.hpcp, HPCP_BINS),
-    beatHistBpms: meanArray((w) => w.beatHistBpms, BEAT_HIST_PEAKS),
-    beatHistWeights: meanArray((w) => w.beatHistWeights, BEAT_HIST_PEAKS),
-    rmsMean: meanScalar((w) => w.rmsMean),
-    rmsStd: meanScalar((w) => w.rmsStd),
-    crestFactor: meanScalar((w) => w.crestFactor),
-    dynamicComplexity: meanScalar((w) => w.dynamicComplexity),
-  };
-}
-
-function buildFingerprint(windows) {
-  return {
-    version: 2,
-    aggregate: aggregateFeatureVectors(windows),
-    windows,
-  };
-}
-
-function extractFingerprint(essentia, left, right, sampleRate) {
+/** Multi-window fingerprint (equal segments) + loudest-window seek offset. */
+export function extractFingerprint(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  embedding?: number[],
+): { fingerprint: FeatureFingerprint; loudestStartSec: number } {
   const n = Math.min(left.length, right.length);
   const durationSec = n / sampleRate;
   const { count, windowSec } = planAnalysisWindows(durationSec);
   const windowSamples = Math.max(1, Math.floor(windowSec * sampleRate));
-  const windows = [];
+  const windows: FeatureVector[] = [];
 
   for (let w = 0; w < count; w++) {
     const start = Math.min(n - 1, Math.floor(w * windowSamples));
@@ -530,7 +511,6 @@ function extractFingerprint(essentia, left, right, sampleRate) {
     if (end - start < sampleRate * 0.5) continue;
     windows.push(
       extractFeatures(
-        essentia,
         left.subarray(start, end),
         right.subarray(start, end),
         sampleRate,
@@ -539,27 +519,18 @@ function extractFingerprint(essentia, left, right, sampleRate) {
   }
 
   if (windows.length === 0) {
-    windows.push(extractFeatures(essentia, left, right, sampleRate));
+    windows.push(extractFeatures(left, right, sampleRate));
   }
 
-  return buildFingerprint(windows);
+  const mono = mixToMono(left, right);
+  const loudestStartSec = findLoudestWindowStartSeconds(
+    mono,
+    sampleRate,
+    Math.min(DEFAULT_LOUDEST_WINDOW_SECONDS, durationSec),
+  );
+
+  return {
+    fingerprint: buildFingerprint(windows, embedding),
+    loudestStartSec,
+  };
 }
-
-self.onmessage = async (event) => {
-  const { left, right, sampleRate } = event.data;
-  try {
-    const essentia = await essentiaReady;
-    const fingerprint = extractFingerprint(
-      essentia,
-      left,
-      right,
-      sampleRate,
-    );
-    self.postMessage({ type: "result", fingerprint });
-  } catch (error) {
-    self.postMessage({
-      type: "error",
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
-};

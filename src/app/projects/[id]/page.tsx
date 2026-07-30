@@ -5,6 +5,7 @@ import { ProjectDetail } from "@/app/projects/[id]/project-detail";
 import { AppHeader } from "@/components/app-header";
 import { PageShell } from "@/components/page-shell";
 import { sql } from "@/lib/db";
+import { refreshEphemeralPreviewUrls } from "@/lib/refresh-previews";
 
 type PageProps = { params: Promise<{ id: string }> };
 
@@ -44,6 +45,7 @@ export default async function ProjectPage({ params }: PageProps) {
       sr.note,
       sr.created_at,
       rt.id,
+      rt.itunes_track_id,
       rt.title,
       rt.artist,
       rt.artwork_url,
@@ -54,6 +56,21 @@ export default async function ProjectPage({ params }: PageProps) {
     WHERE sr.project_id = ${id}
     ORDER BY sr.created_at DESC
   `;
+
+  const savedReferences = saved.map((row) => ({
+    savedId: row.saved_id as string,
+    note: (row.note as string | null) ?? null,
+    savedAt: String(row.created_at),
+    id: row.id as string,
+    itunesTrackId: Number(row.itunes_track_id),
+    title: row.title as string,
+    artist: row.artist as string,
+    artworkUrl: (row.artwork_url as string | null) ?? null,
+    previewUrl: row.preview_url as string,
+    previewStartSec:
+      row.preview_start_sec == null ? null : Number(row.preview_start_sec),
+  }));
+  await refreshEphemeralPreviewUrls(savedReferences);
 
   return (
     <>
@@ -68,20 +85,7 @@ export default async function ProjectPage({ params }: PageProps) {
             createdAt: String(row.created_at),
             matchCount: row.match_count as number,
           }))}
-          savedReferences={saved.map((row) => ({
-            savedId: row.saved_id as string,
-            note: (row.note as string | null) ?? null,
-            savedAt: String(row.created_at),
-            id: row.id as string,
-            title: row.title as string,
-            artist: row.artist as string,
-            artworkUrl: (row.artwork_url as string | null) ?? null,
-            previewUrl: row.preview_url as string,
-            previewStartSec:
-              row.preview_start_sec == null
-                ? null
-                : Number(row.preview_start_sec),
-          }))}
+          savedReferences={savedReferences}
         />
       </PageShell>
     </>

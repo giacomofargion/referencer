@@ -2,9 +2,14 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 import { sql } from "@/lib/db";
-import { isFeatureVector } from "@/lib/feature-vector";
+import {
+  getAggregateFeatures,
+  isStoredFingerprint,
+} from "@/lib/feature-vector";
+import { isEphemeralPreviewUrl, lookupItunesTracks } from "@/lib/itunes";
 import { isUuid } from "@/lib/ids";
-import type { FeatureVector } from "@/lib/types";
+import { refreshEphemeralPreviewUrls } from "@/lib/refresh-previews";
+import type { StoredFingerprint } from "@/lib/types";
 
 type RouteContext = { params: Promise<{ uploadId: string }> };
 
@@ -35,13 +40,14 @@ export async function GET(_request: Request, context: RouteContext) {
   }
 
   const upload = uploads[0];
-  const clientFeatures = upload.feature_vector as FeatureVector | null;
-  if (!isFeatureVector(clientFeatures)) {
+  const stored = upload.feature_vector as StoredFingerprint | null;
+  if (!isStoredFingerprint(stored)) {
     return NextResponse.json(
       { error: "Session has no analysis yet" },
       { status: 400 },
     );
   }
+  const clientFeatures = getAggregateFeatures(stored);
 
   const projectId = (upload.project_id as string | null) ?? null;
 
@@ -80,7 +86,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
   const matches = [];
   for (const row of matchRows) {
-    if (!isFeatureVector(row.feature_vector)) continue;
+    if (!isStoredFingerprint(row.feature_vector)) continue;
     const id = row.id as string;
     matches.push({
       id,
@@ -95,10 +101,14 @@ export async function GET(_request: Request, context: RouteContext) {
         row.preview_start_sec == null ? null : Number(row.preview_start_sec),
       distanceScore: Number(row.distance_score),
       explanation: row.explanation_text as string,
-      featureVector: row.feature_vector,
+      featureVector: getAggregateFeatures(
+        row.feature_vector as StoredFingerprint,
+      ),
       saved: savedIds.has(id),
     });
   }
+
+  await refreshEphemeralPreviewUrls(matches);
 
   return NextResponse.json({
     session: {

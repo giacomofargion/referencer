@@ -79,6 +79,7 @@ export function ABPlayer({
   const [source, setSource] = useState<ABSource>("reference");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [previewError, setPreviewError] = useState(false);
   const [clientStart, setClientStart] = useState(0);
   const [referenceStart, setReferenceStart] = useState(
     Math.max(0, referenceStartSec ?? 0),
@@ -88,6 +89,11 @@ export function ABPlayer({
   const referenceStartRef = useRef(Math.max(0, referenceStartSec ?? 0));
 
   const canClient = Boolean(clientUrl);
+
+  // Reset error state when the reference URL changes.
+  useEffect(() => {
+    setPreviewError(false);
+  }, [referenceUrl]);
 
   useEffect(() => {
     clientStartRef.current = clientStart;
@@ -210,6 +216,7 @@ export function ABPlayer({
     applyRelativeOffset(offset);
 
     void reference.play().catch(() => {
+      setPreviewError(true);
       onPlayingChange(false);
     });
     if (client && clientUrl) {
@@ -341,9 +348,18 @@ export function ABPlayer({
         preload="auto"
         muted
         onEnded={() => onPlayingChange(false)}
+        onError={() => {
+          setPreviewError(true);
+          onPlayingChange(false);
+        }}
+        onLoadedData={() => setPreviewError(false)}
       />
 
-      {canClient ? (
+      {previewError ? (
+        <p className="text-center text-xs text-text-muted" role="status">
+          Preview unavailable — try another reference
+        </p>
+      ) : canClient ? (
         <p
           className={cn(
             "text-center text-xs",

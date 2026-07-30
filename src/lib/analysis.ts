@@ -1,10 +1,12 @@
-import type { FeatureVector } from "@/lib/types";
+import type { FeatureFingerprint } from "@/lib/types";
 
 /**
  * Decodes an audio file with the Web Audio API and analyzes it in the
- * Essentia worker. Returns the sonic feature vector used for matching.
+ * Essentia worker. Returns a v2 multi-window fingerprint.
  */
-export async function analyzeAudioFile(file: File): Promise<FeatureVector> {
+export async function analyzeAudioFile(
+  file: File,
+): Promise<FeatureFingerprint> {
   const audioContext = new AudioContext();
   try {
     const audioBuffer = await audioContext.decodeAudioData(
@@ -12,7 +14,6 @@ export async function analyzeAudioFile(file: File): Promise<FeatureVector> {
     );
 
     const left = audioBuffer.getChannelData(0);
-    // Mono files: analyze the single channel as both sides (width = 0).
     const right =
       audioBuffer.numberOfChannels > 1
         ? audioBuffer.getChannelData(1)
@@ -32,14 +33,14 @@ function runWorker(
   left: Float32Array,
   right: Float32Array,
   sampleRate: number,
-): Promise<FeatureVector> {
+): Promise<FeatureFingerprint> {
   return new Promise((resolve, reject) => {
     const worker = new Worker("/workers/analysis-worker.js");
 
     worker.onmessage = (event) => {
       worker.terminate();
       if (event.data.type === "result") {
-        resolve(event.data.featureVector as FeatureVector);
+        resolve(event.data.fingerprint as FeatureFingerprint);
       } else {
         reject(new Error(event.data.message ?? "Audio analysis failed"));
       }

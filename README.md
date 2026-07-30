@@ -26,11 +26,11 @@ No paid music-AI API and no always-on Python worker required for the live path.
 
 | Area | Implementation |
 | --- | --- |
-| **Client audio ML** | Essentia.js (WASM) — LUFS, LRA, 7-band balance, BPM, stereo width |
-| **Genre tagging** | Discogs-EffNet (TF.js) in a Web Worker — 400 Discogs styles |
+| **Client audio ML** | Essentia.js (WASM) — metering + MFCC, spectral, HPCP, multi-window fingerprints |
+| **Genre tagging** | Discogs-EffNet (TF.js) — 400 styles + optional 512-d penultimate embedding |
 | **Discovery** | Style-first Deezer/iTunes search + hard genre neighborhood gate |
 | **Hydration cache** | Neon `reference_tracks` stores analyzed previews (not the search index) |
-| **Similarity ranking** | Essentia re-rank with tone / loudness / balanced presets |
+| **Similarity ranking** | Z-score + weighted cosine (balanced); Euclidean tone/loudness presets; click-learned weights |
 | **Backend** | Next.js Route Handlers, Clerk auth, Neon Postgres, Cloudflare R2 |
 | **Payments** | Stripe Checkout credit packs; 1 credit = 1 similarity search |
 | **UX** | Upload → match carousel, EQ meters, loudest-window A/B, projects + history |
@@ -53,15 +53,15 @@ No paid music-AI API and no always-on Python worker required for the live path.
 
 ```
 ┌─────────────┐  Discogs-EffNet (browser)  ┌─────────────────┐
-│  Browser    │ ─────────────────────────► │ Genre / style   │
-│  Upload UI  │  Essentia metering         └────────┬────────┘
+│  Browser    │ ─────────────────────────► │ Genre + embed   │
+│  Upload UI  │  Essentia multi-window     └────────┬────────┘
 └──────┬──────┘                                     │
-       │ features + genre + instruments             │ style-first queries
+       │ fingerprint + genre + instruments          │ style-first queries
        ▼                                            ▼
 ┌─────────────┐   Deezer + iTunes          ┌─────────────────┐
 │  /api/match │ ◄─────────────────────────│ Preview shortlist│
 └──────┬──────┘   hard genre gate + cache  └─────────────────┘
-       │ Essentia re-rank (inside gate)
+       │ Cosine / Euclidean re-rank (+ learned weights)
        ▼
 ┌─────────────┐
 │ Ranked refs │ → lightbox + A/B
@@ -98,7 +98,25 @@ npm run dev
 1. [dash.cloudflare.com](https://dash.cloudflare.com) → **R2** → create a bucket (e.g. `referencer-audio`).
 2. Create an Account API token with Object Read & Write on that bucket.
 3. Put `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` in `.env.local`.
-4. **CORS (required for browser uploads):** allow `PUT` from your app origin on that bucket.
+4. **CORS (required for browser uploads):** R2 → bucket → **Settings** → **CORS policy**. Example:
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "https://tonemap.online"
+    ],
+    "AllowedMethods": ["GET", "PUT", "HEAD"],
+    "AllowedHeaders": ["Content-Type"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Without this, the browser PUT is blocked and session clips won’t store (matching still runs).
 
 ### Owner unlimited matches
 

@@ -16,6 +16,7 @@ import {
 import { useAuthedFetch } from "@/hooks/use-authed-fetch";
 
 const BUY_EVENT = "tonemap:buy-credits";
+const CREDITS_UPDATED_EVENT = "tonemap:credits-updated";
 
 interface CreditPack {
   quantity: number;
@@ -47,7 +48,7 @@ export function CreditsBalance() {
     let cancelled = false;
     void (async () => {
       const response = await authedFetch("/api/credits/balance");
-      if (!response.ok) return;
+      if (!response.ok || cancelled) return;
       const payload = (await response.json()) as BalancePayload;
       if (!cancelled) {
         setData(payload);
@@ -108,9 +109,37 @@ export function CreditsBalance() {
     function onBuyRequest() {
       setOpen(true);
     }
+    function onCreditsUpdated(event: Event) {
+      const detail = (event as CustomEvent<{ balance?: number }>).detail;
+      if (
+        typeof detail?.balance === "number" &&
+        Number.isFinite(detail.balance)
+      ) {
+        setData((current) =>
+          current
+            ? { ...current, balance: detail.balance as number }
+            : {
+                balance: detail.balance as number,
+                creditPriceCents: 49,
+                freeStarterCredits: 5,
+                packs: [],
+              },
+        );
+        return;
+      }
+      void (async () => {
+        const response = await authedFetch("/api/credits/balance");
+        if (!response.ok) return;
+        setData((await response.json()) as BalancePayload);
+      })();
+    }
     window.addEventListener(BUY_EVENT, onBuyRequest);
-    return () => window.removeEventListener(BUY_EVENT, onBuyRequest);
-  }, []);
+    window.addEventListener(CREDITS_UPDATED_EVENT, onCreditsUpdated);
+    return () => {
+      window.removeEventListener(BUY_EVENT, onBuyRequest);
+      window.removeEventListener(CREDITS_UPDATED_EVENT, onCreditsUpdated);
+    };
+  }, [authedFetch]);
 
   async function checkout() {
     setBuying(true);
@@ -234,4 +263,13 @@ export function CreditsBalance() {
 /** Open the header buy dialog from anywhere (e.g. out-of-credits toast). */
 export function openBuyCreditsDialog() {
   window.dispatchEvent(new Event(BUY_EVENT));
+}
+
+/** Update the header credit count after a search (or force a refetch). */
+export function notifyCreditsUpdated(balance?: number) {
+  window.dispatchEvent(
+    new CustomEvent(CREDITS_UPDATED_EVENT, {
+      detail: typeof balance === "number" ? { balance } : {},
+    }),
+  );
 }

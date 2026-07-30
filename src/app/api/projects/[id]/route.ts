@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 import { sql } from "@/lib/db";
+import { refreshEphemeralPreviewUrls } from "@/lib/refresh-previews";
 
 const MAX_NAME_LENGTH = 120;
 
@@ -65,6 +66,23 @@ export async function GET(_request: Request, context: RouteContext) {
     ORDER BY sr.created_at DESC
   `;
 
+  const savedReferences = saved.map((row) => ({
+    savedId: row.saved_id as string,
+    note: (row.note as string | null) ?? null,
+    savedAt: row.created_at as string,
+    id: row.id as string,
+    itunesTrackId: Number(row.itunes_track_id),
+    title: row.title as string,
+    artist: row.artist as string,
+    album: (row.album as string | null) ?? null,
+    artworkUrl: (row.artwork_url as string | null) ?? null,
+    genre: row.genre as string,
+    previewUrl: row.preview_url as string,
+    previewStartSec:
+      row.preview_start_sec == null ? null : Number(row.preview_start_sec),
+  }));
+  await refreshEphemeralPreviewUrls(savedReferences);
+
   return NextResponse.json({
     project: {
       id: project.id as string,
@@ -77,21 +95,7 @@ export async function GET(_request: Request, context: RouteContext) {
       createdAt: row.created_at as string,
       matchCount: row.match_count as number,
     })),
-    savedReferences: saved.map((row) => ({
-      savedId: row.saved_id as string,
-      note: (row.note as string | null) ?? null,
-      savedAt: row.created_at as string,
-      id: row.id as string,
-      itunesTrackId: Number(row.itunes_track_id),
-      title: row.title as string,
-      artist: row.artist as string,
-      album: (row.album as string | null) ?? null,
-      artworkUrl: (row.artwork_url as string | null) ?? null,
-      genre: row.genre as string,
-      previewUrl: row.preview_url as string,
-      previewStartSec:
-        row.preview_start_sec == null ? null : Number(row.preview_start_sec),
-    })),
+    savedReferences,
   });
 }
 

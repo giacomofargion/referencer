@@ -5,9 +5,9 @@ export type CreditReason = "purchase" | "match_spend" | "refund" | "grant";
 
 export function freeStarterCredits(): number {
   const raw = process.env.FREE_STARTER_CREDITS?.trim();
-  if (raw === undefined || raw === "") return 2;
+  if (raw === undefined || raw === "") return 5;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) return 2;
+  if (!Number.isFinite(parsed) || parsed < 0) return 5;
   return parsed;
 }
 
@@ -66,7 +66,7 @@ async function ensureUserRow(clerkUserId: string): Promise<void> {
 
 /**
  * One-time free credits for new users. Idempotent via ledger reason=grant.
- * Tunable with FREE_STARTER_CREDITS (default 2).
+ * Tunable with FREE_STARTER_CREDITS (default 5).
  */
 export async function ensureStarterGrant(clerkUserId: string): Promise<void> {
   const amount = freeStarterCredits();

@@ -10,13 +10,7 @@ export function usePromptSignIn() {
 
   return useCallback(() => {
     toast.message(
-      "Sign in to find references — new accounts get 2 free searches.",
-      {
-        action: {
-          label: "Sign in",
-          onClick: () => openSignIn({}),
-        },
-      },
+      "Sign in to find references — new accounts get 5 free credits.",
     );
     openSignIn({});
   }, [openSignIn]);

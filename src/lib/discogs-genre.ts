@@ -2,10 +2,14 @@
  * Client helper: Discogs-EffNet genre tagging in a Web Worker.
  */
 
+import { DISCOGS_EMBEDDING_DIM } from "@/lib/types";
+
 export interface DiscogsGenreResult {
   discogsLabel: string | null;
   confidence: number;
   topDiscogs: Array<{ label: string; score: number }>;
+  /** L2-normalized 512-d penultimate embedding when TF.js exposes the node. */
+  embedding?: number[];
 }
 
 /** Covers WASM init + TF.js load + inference; must not leave the UI hung. */
@@ -15,7 +19,9 @@ const WORKER_TIMEOUT_MS = 60_000;
  * Downmix + classify with the browser Discogs-EffNet model.
  * Requires `public/models/discogs-genre/` (scripts/download-discogs-tfjs.sh).
  */
-export async function classifyDiscogsGenre(file: File): Promise<DiscogsGenreResult> {
+export async function classifyDiscogsGenre(
+  file: File,
+): Promise<DiscogsGenreResult> {
   const audioContext = new AudioContext();
   try {
     const buffer = await audioContext.decodeAudioData(await file.arrayBuffer());
@@ -58,15 +64,22 @@ function runGenreWorker(
 
     worker.onmessage = (event) => {
       if (event.data.type === "result") {
-        settle(() =>
+        settle(() => {
+          const embedding = Array.isArray(event.data.embedding)
+            ? (event.data.embedding as number[])
+            : undefined;
           resolve({
             discogsLabel: event.data.discogsLabel ?? null,
             confidence: Number(event.data.confidence ?? 0),
             topDiscogs: Array.isArray(event.data.topDiscogs)
               ? event.data.topDiscogs
               : [],
-          }),
-        );
+            embedding:
+              embedding && embedding.length === DISCOGS_EMBEDDING_DIM
+                ? embedding
+                : undefined,
+          });
+        });
       } else {
         settle(() =>
           reject(new Error(event.data.message ?? "Genre tagging failed")),

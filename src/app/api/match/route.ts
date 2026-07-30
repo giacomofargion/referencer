@@ -6,7 +6,10 @@ import { debitForMatch, refundMatch } from "@/lib/credits";
 import { sql } from "@/lib/db";
 import { searchDeezerTracks, type PlatformTrack } from "@/lib/deezer";
 import { explainMatch } from "@/lib/explanations";
-import { isFeatureVector } from "@/lib/feature-vector";
+import {
+  getAggregateFeatures,
+  isStoredFingerprint,
+} from "@/lib/feature-vector";
 import {
   genreDistancePenalty,
   instrumentsFromDiscogsLabel,
@@ -15,10 +18,17 @@ import {
   searchQueriesForDiscovery,
   type MatchGenre,
 } from "@/lib/genres";
-import { searchItunesSongs, type ItunesTrack } from "@/lib/itunes";
+import {
+  isEphemeralPreviewUrl,
+  lookupItunesTracks,
+  searchItunesSongs,
+  type ItunesTrack,
+} from "@/lib/itunes";
 import { pickStrictItunesMatch } from "@/lib/itunes-match";
+import { getLearnedWeightMultipliers } from "@/lib/learned-weights";
 import { rankBySonicSimilarity } from "@/lib/matching";
-import type { FeatureVector } from "@/lib/types";
+import { refreshEphemeralPreviewUrls } from "@/lib/refresh-previews";
+import type { StoredFingerprint } from "@/lib/types";
 
 export const maxDuration = 60;
 
@@ -42,7 +52,7 @@ interface CachedReference {
   genre: string;
   preview_url: string;
   preview_start_sec: number | null;
-  feature_vector: FeatureVector;
+  feature_vector: StoredFingerprint;
 }
 
 function parseInstrumentsField(raw: unknown): string[] {
@@ -133,14 +143,15 @@ export async function POST(request: Request) {
 
   const upload = uploads[0];
   const projectId = (upload.project_id as string | null) ?? null;
-  const clientFeatures = upload.feature_vector as FeatureVector | null;
+  const clientFingerprint = upload.feature_vector as StoredFingerprint | null;
 
-  if (!isFeatureVector(clientFeatures)) {
+  if (!isStoredFingerprint(clientFingerprint)) {
     return NextResponse.json(
       { error: "Upload has not been analyzed yet" },
       { status: 400 },
     );
   }
+  const clientFeatures = getAggregateFeatures(clientFingerprint);
 
   const balanceAfterDebit = await debitForMatch(userId, uploadId);
   if (balanceAfterDebit === null) {
@@ -225,17 +236,21 @@ export async function POST(request: Request) {
     return NextResponse.json({
       matches: [],
       clientFeatures,
+      creditsRemaining: balanceAfterDebit,
       discoveryNote:
         "No playable references found for this genre — try again in a moment.",
     });
   }
 
+  const weightMultipliers = await getLearnedWeightMultipliers();
   const ranked = rankBySonicSimilarity(
-    clientFeatures,
+    clientFingerprint,
     pool.map((row) => ({
       item: row,
       features: row.feature_vector,
     })),
+    "balanced",
+    weightMultipliers,
   )
     .map((hit) => ({
       ...hit,
@@ -290,11 +305,15 @@ export async function POST(request: Request) {
     });
   }
 
+  // Final pass: replace any remaining Deezer CDN URLs before the client plays them.
+  await refreshEphemeralPreviewUrls(matches);
+
   return NextResponse.json({
     matches,
     clientFeatures,
     projectId,
     discoveryNote,
+    creditsRemaining: balanceAfterDebit,
   });
 }
 
@@ -396,8 +415,8 @@ async function hydratePlatformTracks(
       );
       if (matched) {
         itunesId = matched.itunesTrackId;
-        // Prefer Deezer preview when we already have one (often more reliable).
-        previewUrl = hit.previewUrl || matched.previewUrl;
+        // Prefer stable iTunes previews — Deezer CDN URLs expire (~15 min).
+        previewUrl = matched.previewUrl || hit.previewUrl;
         title = matched.title;
         artist = matched.artist;
         album = matched.album ?? album;
@@ -419,16 +438,33 @@ async function hydratePlatformTracks(
     if (pastDeadline()) break;
 
     const existing = await sql`
-      SELECT id, preview_start_sec FROM reference_tracks
+      SELECT id, preview_start_sec, preview_url, feature_vector FROM reference_tracks
       WHERE itunes_track_id = ${itunesId} AND feature_vector IS NOT NULL
       LIMIT 1
     `;
 
-    if (existing.length === 0 || existing[0].preview_start_sec == null) {
+    const cached = existing[0];
+    const needsReanalyze =
+      !cached ||
+      cached.preview_start_sec == null ||
+      !isStoredFingerprint(cached.feature_vector) ||
+      (typeof cached.feature_vector === "object" &&
+        cached.feature_vector !== null &&
+        (cached.feature_vector as { version?: number }).version !== 2);
+
+    if (needsReanalyze) {
       if (analyzed >= MAX_HYDRATIONS) continue;
       if (pastDeadline()) break;
       try {
-        const { features, loudestStartSec } = await analyzePreviewUrl(previewUrl);
+        // Prefer a stable URL for analysis when the hit only has Deezer.
+        let analyzeUrl = previewUrl;
+        if (isEphemeralPreviewUrl(analyzeUrl)) {
+          const fresh = await lookupItunesTracks([itunesId]);
+          const itunesPreview = fresh.get(itunesId)?.previewUrl;
+          if (itunesPreview) analyzeUrl = itunesPreview;
+        }
+        const { fingerprint, loudestStartSec } =
+          await analyzePreviewUrl(analyzeUrl);
         await upsertReference(
           {
             itunesTrackId: itunesId,
@@ -438,14 +474,29 @@ async function hydratePlatformTracks(
             artworkUrl,
             genre,
             itunesGenre,
-            previewUrl,
+            previewUrl: analyzeUrl,
           },
-          features,
+          fingerprint,
           loudestStartSec,
         );
         analyzed += 1;
       } catch {
         continue;
+      }
+    } else {
+      // Cache hit: swap ephemeral Deezer URLs for stable iTunes ones (no re-analyze).
+      const storedUrl = String(cached.preview_url ?? "");
+      if (isEphemeralPreviewUrl(storedUrl)) {
+        const stable =
+          (!isEphemeralPreviewUrl(previewUrl) ? previewUrl : null) ||
+          (await lookupItunesTracks([itunesId])).get(itunesId)?.previewUrl;
+        if (stable && stable !== storedUrl) {
+          await sql`
+            UPDATE reference_tracks
+            SET preview_url = ${stable}
+            WHERE itunes_track_id = ${itunesId}
+          `;
+        }
       }
     }
 
@@ -467,7 +518,7 @@ async function upsertReference(
     itunesGenre: string;
     previewUrl: string;
   },
-  features: FeatureVector,
+  fingerprint: StoredFingerprint,
   loudestStartSec: number,
 ): Promise<void> {
   await sql`
@@ -480,7 +531,7 @@ async function upsertReference(
       ${track.itunesTrackId}, ${track.title}, ${track.artist},
       ${track.album}, ${track.artworkUrl}, ${track.genre},
       ${track.itunesGenre}, ${track.previewUrl},
-      ${JSON.stringify(features)}::jsonb, now(),
+      ${JSON.stringify(fingerprint)}::jsonb, now(),
       ${loudestStartSec}
     )
     ON CONFLICT (itunes_track_id) DO UPDATE SET
@@ -530,7 +581,7 @@ async function loadGenreCachedReferences(
 
 function mapCached(rows: Array<Record<string, unknown>>): CachedReference[] {
   return rows
-    .filter((row) => isFeatureVector(row.feature_vector))
+    .filter((row) => isStoredFingerprint(row.feature_vector))
     .map((row) => ({
       id: row.id as string,
       itunes_track_id: Number(row.itunes_track_id),
@@ -542,6 +593,6 @@ function mapCached(rows: Array<Record<string, unknown>>): CachedReference[] {
       preview_url: row.preview_url as string,
       preview_start_sec:
         row.preview_start_sec == null ? null : Number(row.preview_start_sec),
-      feature_vector: row.feature_vector as FeatureVector,
+      feature_vector: row.feature_vector as StoredFingerprint,
     }));
 }

@@ -2,23 +2,9 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 import { sql } from "@/lib/db";
-import type { FeatureVector } from "@/lib/types";
+import { isStoredFingerprint } from "@/lib/feature-vector";
 
-function isValidFeatureVector(value: unknown): value is FeatureVector {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.integratedLoudnessLufs === "number" &&
-    typeof v.loudnessRangeDb === "number" &&
-    typeof v.tempoBpm === "number" &&
-    typeof v.stereoWidth === "number" &&
-    Array.isArray(v.frequencyBandEnergies) &&
-    v.frequencyBandEnergies.length === 7 &&
-    v.frequencyBandEnergies.every((n) => typeof n === "number")
-  );
-}
-
-/** Attaches the browser-computed feature vector to an upload. */
+/** Attaches the browser-computed fingerprint to an upload. */
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -31,7 +17,7 @@ export async function PATCH(
   const { id } = await params;
   const body = (await request.json()) as { featureVector?: unknown };
 
-  if (!isValidFeatureVector(body.featureVector)) {
+  if (!isStoredFingerprint(body.featureVector)) {
     return NextResponse.json(
       { error: "Invalid feature vector" },
       { status: 400 },
