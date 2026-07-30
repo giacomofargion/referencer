@@ -1,10 +1,13 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
-import { creditPriceCents } from "@/lib/credits";
+import {
+  CREDIT_PACKS,
+  creditPriceCents,
+  findCreditPack,
+  priceForQuantity,
+} from "@/lib/credits";
 import { getStripe, isStripeConfigured } from "@/lib/stripe";
-
-const MAX_QUANTITY = 100;
 
 export async function POST(request: Request) {
   const { userId } = await auth();
@@ -19,7 +22,7 @@ export async function POST(request: Request) {
     );
   }
 
-  let quantity = 1;
+  let quantity = 5;
   try {
     const body = (await request.json()) as { quantity?: unknown };
     if (typeof body.quantity === "number" && Number.isInteger(body.quantity)) {
@@ -29,16 +32,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  if (quantity < 1 || quantity > MAX_QUANTITY) {
+  const pack = findCreditPack(quantity);
+  if (!pack) {
     return NextResponse.json(
-      { error: `quantity must be between 1 and ${MAX_QUANTITY}` },
+      {
+        error: `Choose a pack: ${CREDIT_PACKS.map((p) => p.quantity).join(", ")} credits`,
+      },
       { status: 400 },
     );
   }
 
+  const baseUnit = creditPriceCents();
+  const { unitCents, totalCents } = priceForQuantity(quantity);
   const origin = new URL(request.url).origin;
-  const unitAmount = creditPriceCents();
   const stripe = getStripe();
+  const savePct =
+    baseUnit > unitCents
+      ? Math.round((1 - unitCents / baseUnit) * 100)
+      : 0;
 
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
@@ -51,13 +62,17 @@ export async function POST(request: Request) {
     },
     line_items: [
       {
-        quantity,
+        quantity: 1,
         price_data: {
           currency: "gbp",
-          unit_amount: unitAmount,
+          // One line item for the whole pack keeps the Stripe receipt clear.
+          unit_amount: totalCents,
           product_data: {
-            name: "Similarity search credit",
-            description: "1 credit = 1 Cyanite similarity search",
+            name: `${quantity} similarity search credits`,
+            description:
+              savePct > 0
+                ? `${formatPence(unitCents)} each (${savePct}% off ${formatPence(baseUnit)})`
+                : `${formatPence(unitCents)} each · 1 credit = 1 search`,
           },
         },
       },
@@ -72,4 +87,11 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({ url: session.url });
+}
+
+function formatPence(pence: number): string {
+  return new Intl.NumberFormat("en-GB", {
+    style: "currency",
+    currency: "GBP",
+  }).format(pence / 100);
 }

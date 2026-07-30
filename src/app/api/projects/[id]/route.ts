@@ -57,7 +57,8 @@ export async function GET(_request: Request, context: RouteContext) {
       rt.album,
       rt.artwork_url,
       rt.genre,
-      rt.preview_url
+      rt.preview_url,
+      rt.preview_start_sec
     FROM saved_references sr
     JOIN reference_tracks rt ON rt.id = sr.reference_track_id
     WHERE sr.project_id = ${id}
@@ -88,6 +89,8 @@ export async function GET(_request: Request, context: RouteContext) {
       artworkUrl: (row.artwork_url as string | null) ?? null,
       genre: row.genre as string,
       previewUrl: row.preview_url as string,
+      previewStartSec:
+        row.preview_start_sec == null ? null : Number(row.preview_start_sec),
     })),
   });
 }

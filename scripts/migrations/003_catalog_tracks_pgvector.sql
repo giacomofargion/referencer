@@ -1,0 +1,3 @@
+-- Legacy: MERT catalog moved to R2 + in-process ANN in workers/mert-embed.
+-- Kept only so older environments know this table is obsolete.
+-- DROP TABLE IF EXISTS catalog_tracks CASCADE;

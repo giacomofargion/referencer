@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 import {
+  CREDIT_PACKS,
   creditPriceCents,
   freeStarterCredits,
   getBalance,
@@ -18,5 +19,6 @@ export async function GET() {
     balance,
     creditPriceCents: creditPriceCents(),
     freeStarterCredits: freeStarterCredits(),
+    packs: CREDIT_PACKS,
   });
 }

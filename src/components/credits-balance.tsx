@@ -15,14 +15,18 @@ import {
 } from "@/components/ui/dialog";
 import { useAuthedFetch } from "@/hooks/use-authed-fetch";
 
-const PACKS = [1, 5, 10, 20, 50] as const;
-const MAX_QUANTITY = 100;
 const BUY_EVENT = "tonemap:buy-credits";
+
+interface CreditPack {
+  quantity: number;
+  unitCents: number;
+}
 
 interface BalancePayload {
   balance: number;
   creditPriceCents: number;
   freeStarterCredits: number;
+  packs: CreditPack[];
 }
 
 function formatGbp(pence: number): string {
@@ -37,7 +41,6 @@ export function CreditsBalance() {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<BalancePayload | null>(null);
   const [quantity, setQuantity] = useState(5);
-  const [customValue, setCustomValue] = useState("5");
   const [buying, setBuying] = useState(false);
 
   useEffect(() => {
@@ -46,7 +49,11 @@ export function CreditsBalance() {
       const response = await authedFetch("/api/credits/balance");
       if (!response.ok) return;
       const payload = (await response.json()) as BalancePayload;
-      if (!cancelled) setData(payload);
+      if (!cancelled) {
+        setData(payload);
+        const firstPack = payload.packs?.[0]?.quantity ?? 5;
+        setQuantity(firstPack);
+      }
     })();
     return () => {
       cancelled = true;
@@ -105,12 +112,6 @@ export function CreditsBalance() {
     return () => window.removeEventListener(BUY_EVENT, onBuyRequest);
   }, []);
 
-  function selectQuantity(next: number) {
-    const clamped = Math.min(MAX_QUANTITY, Math.max(1, next));
-    setQuantity(clamped);
-    setCustomValue(String(clamped));
-  }
-
   async function checkout() {
     setBuying(true);
     try {
@@ -132,7 +133,18 @@ export function CreditsBalance() {
     }
   }
 
-  const unit = data?.creditPriceCents ?? 190;
+  const packs = data?.packs ?? [
+    { quantity: 5, unitCents: 49 },
+    { quantity: 20, unitCents: 39 },
+    { quantity: 50, unitCents: 35 },
+    { quantity: 100, unitCents: 29 },
+  ];
+  const baseUnit = data?.creditPriceCents ?? 49;
+  const selected = packs.find((pack) => pack.quantity === quantity) ?? packs[0];
+  const unit = selected?.unitCents ?? baseUnit;
+  const total = unit * (selected?.quantity ?? quantity);
+  const savePct =
+    baseUnit > unit ? Math.round((1 - unit / baseUnit) * 100) : 0;
 
   return (
     <div className="flex items-center gap-3">
@@ -148,65 +160,66 @@ export function CreditsBalance() {
           <DialogHeader>
             <DialogTitle>Buy credits</DialogTitle>
             <DialogDescription>
-              1 credit = 1 similarity search.{" "}
-              {data
-                ? `You have ${data.balance} left.`
-                : "Loading balance…"}
+              1 credit = 1 similarity search · from {formatGbp(baseUnit)} each.
+              {data ? ` You have ${data.balance} left.` : ""}
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-wrap gap-2">
-              {PACKS.map((pack) => (
+          <div className="flex flex-col gap-3">
+            {packs.map((pack) => {
+              const packTotal = pack.unitCents * pack.quantity;
+              const packSave =
+                baseUnit > pack.unitCents
+                  ? Math.round((1 - pack.unitCents / baseUnit) * 100)
+                  : 0;
+              const selectedPack = quantity === pack.quantity;
+              return (
                 <button
-                  key={pack}
+                  key={pack.quantity}
                   type="button"
-                  onClick={() => selectQuantity(pack)}
-                  className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${
-                    quantity === pack
+                  onClick={() => setQuantity(pack.quantity)}
+                  className={`flex items-center justify-between rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                    selectedPack
                       ? "border-text-primary bg-surface-1 text-text-primary"
                       : "border-border text-text-secondary hover:border-text-muted"
                   }`}
                 >
-                  {pack}
+                  <span className="flex flex-col gap-0.5">
+                    <span className="text-sm font-medium text-text-primary">
+                      {pack.quantity} credits
+                    </span>
+                    <span className="text-xs text-text-muted">
+                      {formatGbp(pack.unitCents)} each
+                      {packSave > 0 ? ` · save ${packSave}%` : ""}
+                    </span>
+                  </span>
+                  <span className="text-sm font-medium text-text-primary">
+                    {formatGbp(packTotal)}
+                  </span>
                 </button>
-              ))}
-            </div>
-
-            <label className="flex flex-col gap-1.5">
-              <span className="text-xs text-text-muted">Custom amount</span>
-              <input
-                type="number"
-                min={1}
-                max={MAX_QUANTITY}
-                inputMode="numeric"
-                value={customValue}
-                onChange={(event) => {
-                  setCustomValue(event.target.value);
-                  const parsed = Number.parseInt(event.target.value, 10);
-                  if (Number.isInteger(parsed) && parsed >= 1) {
-                    setQuantity(Math.min(MAX_QUANTITY, parsed));
-                  }
-                }}
-                onBlur={() => selectQuantity(quantity)}
-                className="h-9 rounded-lg border border-border bg-surface-0 px-3 text-sm text-text-primary outline-none focus-visible:border-ring"
-              />
-            </label>
+              );
+            })}
 
             <p className="text-sm text-text-secondary">
-              {quantity} {quantity === 1 ? "credit" : "credits"} ·{" "}
-              {formatGbp(unit * quantity)}
-              <span className="text-text-muted">
-                {" "}
-                ({formatGbp(unit)} each)
-              </span>
+              {selected?.quantity ?? quantity} credits · {formatGbp(total)}
+              {savePct > 0 ? (
+                <span className="text-text-muted">
+                  {" "}
+                  ({formatGbp(unit)} each · {savePct}% off)
+                </span>
+              ) : (
+                <span className="text-text-muted">
+                  {" "}
+                  ({formatGbp(unit)} each)
+                </span>
+              )}
             </p>
           </div>
 
           <DialogFooter>
             <Button
               type="button"
-              disabled={buying || quantity < 1}
+              disabled={buying || !selected}
               onClick={() => void checkout()}
             >
               {buying ? "Redirecting…" : "Continue to Stripe"}

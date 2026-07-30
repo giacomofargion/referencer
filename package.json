@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "mert:worker": "cd workers/mert-embed && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8091"
   },
   "dependencies": {
     "@audio/decode-aac": "^1.3.4",
@@ -41,6 +42,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
     "tailwindcss": "^4",
+    "tsx": "^4.20.5",
     "typescript": "^5"
   }
 }

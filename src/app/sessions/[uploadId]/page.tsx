@@ -59,6 +59,7 @@ export default async function SessionPage({ params }: PageProps) {
       rt.artwork_url,
       rt.genre,
       rt.preview_url,
+      rt.preview_start_sec,
       rt.feature_vector,
       m.distance_score,
       m.explanation_text
@@ -82,6 +83,8 @@ export default async function SessionPage({ params }: PageProps) {
       artworkUrl: (row.artwork_url as string | null) ?? null,
       genre: row.genre as string,
       previewUrl: row.preview_url as string,
+      previewStartSec:
+        row.preview_start_sec == null ? null : Number(row.preview_start_sec),
       distanceScore: Number(row.distance_score),
       explanation: row.explanation_text as string,
       featureVector: row.feature_vector,

@@ -129,10 +129,6 @@ export function UploadCard() {
       setLightboxOpen(false);
       const featureVector = await analyzeAudioFile(file);
 
-      // One 60s MP3 clip (~1MB) serves both R2 storage and similarity
-      // search — full WAVs would be ~65x larger and reopen A/B compares
-      // against 30s lossy iTunes previews anyway. Live A/B keeps using
-      // the local file at full quality.
       const clip = await encodeClipMp3(file).catch(() => {
         throw new Error("Couldn't prepare the audio clip");
       });
@@ -195,6 +191,7 @@ export function UploadCard() {
       setPhase({ step: "matching" });
       const matchForm = new FormData();
       matchForm.append("uploadId", uploadId);
+      // Clip goes to the MERT worker for catalog ANN (first 30s used).
       matchForm.append("audio", clip, "clip.mp3");
 
       const matchResponse = await authedFetch("/api/match", {
@@ -256,8 +253,8 @@ export function UploadCard() {
           <CardHeader>
             <CardTitle className="text-base">Upload client track</CardTitle>
             <CardDescription className="text-text-muted">
-              WAV or AIFF preferred. The mix is matched against commercial
-              releases by audio similarity — no tagging needed.
+              WAV or AIFF preferred. We&apos;ll find commercial tracks that sound
+              like yours, then rank them by how close the mix feels.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">

@@ -109,7 +109,7 @@ export function explainMatch(
   }
 
   if (parts.length === 0) {
-    return "Closest overall sonic match in the current genre pool.";
+    return "Closest overall sonic match in the current reference pool.";
   }
 
   // Capitalize first clause, join the rest.

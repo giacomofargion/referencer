@@ -3,6 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import { PauseIcon, PlayIcon } from "lucide-react";
 
+import {
+  DEFAULT_LOUDEST_WINDOW_SECONDS,
+  findLoudestWindowStartSeconds,
+  mixToMono,
+} from "@/lib/loudest-window";
 import { cn } from "@/lib/utils";
 
 export type ABSource = "client" | "reference";
@@ -10,6 +15,11 @@ export type ABSource = "client" | "reference";
 interface ABPlayerProps {
   clientUrl: string | null;
   referenceUrl: string;
+  /**
+   * Seconds into the reference preview where the loudest window starts.
+   * When omitted, we try to detect it client-side (may fail on CORS).
+   */
+  referenceStartSec?: number | null;
   /** Lifted transport so artwork / carousel can share play state. */
   playing: boolean;
   onPlayingChange: (playing: boolean) => void;
@@ -29,16 +39,36 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+async function detectLoudestStart(url: string): Promise<number> {
+  const response = await fetch(url);
+  if (!response.ok) return 0;
+  const bytes = await response.arrayBuffer();
+  const context = new AudioContext();
+  try {
+    const buffer = await context.decodeAudioData(bytes.slice(0));
+    const left = buffer.getChannelData(0);
+    const right =
+      buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+    // Copy out of AudioBuffer — getChannelData views can be detached after close.
+    return findLoudestWindowStartSeconds(
+      mixToMono(new Float32Array(left), new Float32Array(right)),
+      buffer.sampleRate,
+      DEFAULT_LOUDEST_WINDOW_SECONDS,
+    );
+  } finally {
+    await context.close();
+  }
+}
+
 /**
  * Instant A/B switch between client and reference. Both elements stay
- * loaded; we mute/unmute and sync currentTime so the cut feels seamless.
- *
- * Layout follows studio now-playing norms: scrubber first, one primary
- * play control, then a clear teal/amber A/B segment.
+ * loaded; we mute/unmute and sync *relative* playheads from each track's
+ * loudest-window start so intros don't dominate the comparison.
  */
 export function ABPlayer({
   clientUrl,
   referenceUrl,
+  referenceStartSec = null,
   playing,
   onPlayingChange,
   layout = "full",
@@ -49,9 +79,109 @@ export function ABPlayer({
   const [source, setSource] = useState<ABSource>("reference");
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [clientStart, setClientStart] = useState(0);
+  const [referenceStart, setReferenceStart] = useState(
+    Math.max(0, referenceStartSec ?? 0),
+  );
   const scrubbingRef = useRef(false);
+  const clientStartRef = useRef(0);
+  const referenceStartRef = useRef(Math.max(0, referenceStartSec ?? 0));
 
   const canClient = Boolean(clientUrl);
+
+  useEffect(() => {
+    clientStartRef.current = clientStart;
+  }, [clientStart]);
+
+  useEffect(() => {
+    referenceStartRef.current = referenceStart;
+  }, [referenceStart]);
+
+  // Prefer server-provided offset; otherwise detect from the preview URL.
+  useEffect(() => {
+    if (referenceStartSec != null && Number.isFinite(referenceStartSec)) {
+      const start = Math.max(0, referenceStartSec);
+      setReferenceStart(start);
+      referenceStartRef.current = start;
+      return;
+    }
+
+    let cancelled = false;
+    detectLoudestStart(referenceUrl)
+      .then((start) => {
+        if (cancelled) return;
+        setReferenceStart(start);
+        referenceStartRef.current = start;
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setReferenceStart(0);
+        referenceStartRef.current = 0;
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [referenceUrl, referenceStartSec]);
+
+  // Client mix: start at its own loudest window (not the same absolute clock).
+  useEffect(() => {
+    if (!clientUrl) {
+      setClientStart(0);
+      clientStartRef.current = 0;
+      return;
+    }
+
+    let cancelled = false;
+    detectLoudestStart(clientUrl)
+      .then((start) => {
+        if (cancelled) return;
+        setClientStart(start);
+        clientStartRef.current = start;
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setClientStart(0);
+        clientStartRef.current = 0;
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clientUrl]);
+
+  function clampToTrack(
+    audio: HTMLAudioElement,
+    start: number,
+    offset: number,
+  ): number {
+    const end = Number.isFinite(audio.duration) ? audio.duration : start + offset;
+    return Math.max(start, Math.min(start + Math.max(0, offset), end));
+  }
+
+  /** Align both players to the same offset from their loudest starts. */
+  function applyRelativeOffset(offset: number) {
+    const client = clientRef.current;
+    const reference = referenceRef.current;
+    if (!reference) return;
+
+    const refT = clampToTrack(reference, referenceStartRef.current, offset);
+    reference.currentTime = refT;
+    if (client) {
+      client.currentTime = clampToTrack(client, clientStartRef.current, offset);
+    }
+    setCurrentTime(refT);
+  }
+
+  function relativeOffsetFromActive(): number {
+    const client = clientRef.current;
+    const reference = referenceRef.current;
+    if (!reference) return 0;
+    if (source === "client" && client) {
+      return Math.max(0, client.currentTime - clientStartRef.current);
+    }
+    return Math.max(0, reference.currentTime - referenceStartRef.current);
+  }
 
   useEffect(() => {
     const client = clientRef.current;
@@ -73,9 +203,11 @@ export function ABPlayer({
       return;
     }
 
-    const t = reference.currentTime;
-    if (client) client.currentTime = t;
-    reference.currentTime = t;
+    const offset =
+      reference.currentTime < referenceStartRef.current
+        ? 0
+        : relativeOffsetFromActive();
+    applyRelativeOffset(offset);
 
     void reference.play().catch(() => {
       onPlayingChange(false);
@@ -83,26 +215,31 @@ export function ABPlayer({
     if (client && clientUrl) {
       void client.play().catch(() => {});
     }
+    // Start offsets live in refs — don't re-run when detection settles or
+    // playback hitch-seeks mid-stream.
   }, [playing, clientUrl, referenceUrl, onPlayingChange]);
 
-  // Drive scrubber from the audible element (both stay in sync on seek).
+  // Seek to loudest start once metadata + start offsets are ready.
   useEffect(() => {
     const reference = referenceRef.current;
     if (!reference) return;
+
+    function onLoadedMetadata() {
+      const audio = referenceRef.current;
+      if (!audio) return;
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setDuration(audio.duration);
+      }
+      if (!playing) {
+        applyRelativeOffset(0);
+      }
+    }
 
     function syncFromAudio() {
       if (scrubbingRef.current) return;
       const audio = referenceRef.current;
       if (!audio) return;
       setCurrentTime(audio.currentTime);
-      if (Number.isFinite(audio.duration) && audio.duration > 0) {
-        setDuration(audio.duration);
-      }
-    }
-
-    function onLoadedMetadata() {
-      const audio = referenceRef.current;
-      if (!audio) return;
       if (Number.isFinite(audio.duration) && audio.duration > 0) {
         setDuration(audio.duration);
       }
@@ -116,7 +253,7 @@ export function ABPlayer({
       reference.removeEventListener("timeupdate", syncFromAudio);
       reference.removeEventListener("loadedmetadata", onLoadedMetadata);
     };
-  }, [referenceUrl]);
+  }, [referenceUrl, referenceStart, playing]);
 
   useEffect(() => {
     if (!enableHotkeys) return;
@@ -158,29 +295,19 @@ export function ABPlayer({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [enableHotkeys, playing, onPlayingChange, canClient]);
 
-  function seekTo(next: number) {
-    const client = clientRef.current;
+  function seekTo(absoluteReferenceTime: number) {
     const reference = referenceRef.current;
     if (!reference) return;
-    const clamped = Math.max(0, Math.min(next, duration || next));
-    reference.currentTime = clamped;
-    if (client) client.currentTime = clamped;
-    setCurrentTime(clamped);
+    const offset = Math.max(
+      0,
+      absoluteReferenceTime - referenceStartRef.current,
+    );
+    applyRelativeOffset(offset);
   }
 
   function setSourceAndMaybePlay(next: ABSource) {
     if (next === "client" && !canClient) return;
-
-    const client = clientRef.current;
-    const reference = referenceRef.current;
-    if (!reference) return;
-
-    const t =
-      source === "reference"
-        ? reference.currentTime
-        : (client?.currentTime ?? 0);
-    if (client) client.currentTime = t;
-    reference.currentTime = t;
+    applyRelativeOffset(relativeOffsetFromActive());
     setSource(next);
     if (!playing) onPlayingChange(true);
   }
@@ -189,6 +316,7 @@ export function ABPlayer({
     source === "client" ? "Your track" : "Reference";
   const isCompact = layout === "compact";
   const max = duration > 0 ? duration : 0;
+  const scrubMin = Math.min(referenceStart, max || referenceStart);
 
   return (
     <div
@@ -227,8 +355,16 @@ export function ABPlayer({
           <span className="font-medium text-text-primary">
             {listeningLabel}
           </span>
+          <span className="text-text-muted">
+            {" "}
+            · loudest section
+          </span>
         </p>
-      ) : null}
+      ) : (
+        <p className="text-center text-xs text-text-muted" aria-live="polite">
+          Loudest section of preview
+        </p>
+      )}
 
       <div className="flex items-center gap-2.5">
         <span className="w-9 shrink-0 text-right font-mono text-[11px] text-text-muted tabular-nums">
@@ -236,10 +372,14 @@ export function ABPlayer({
         </span>
         <input
           type="range"
-          min={0}
-          max={max || 1}
+          min={scrubMin}
+          max={max || scrubMin + 1}
           step={0.01}
-          value={max > 0 ? Math.min(currentTime, max) : 0}
+          value={
+            max > 0
+              ? Math.min(Math.max(currentTime, scrubMin), max)
+              : scrubMin
+          }
           disabled={max <= 0}
           aria-label="Seek"
           className={cn(

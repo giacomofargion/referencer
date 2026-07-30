@@ -1,4 +1,5 @@
 import { sql } from "@/lib/db";
+import { isOwnerUser } from "@/lib/owner";
 
 export type CreditReason = "purchase" | "match_spend" | "refund" | "grant";
 
@@ -10,13 +11,49 @@ export function freeStarterCredits(): number {
   return parsed;
 }
 
-/** Price per credit in GBP pence (default 190 = £1.90). */
+/** Price per credit in GBP pence (default 49 = £0.49). */
 export function creditPriceCents(): number {
   const raw = process.env.CREDIT_PRICE_CENTS?.trim();
-  if (!raw) return 190;
+  if (!raw) return 49;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) return 190;
+  if (!Number.isFinite(parsed) || parsed < 1) return 49;
   return parsed;
+}
+
+export interface CreditPack {
+  quantity: number;
+  /** Pence charged per credit in this pack. */
+  unitCents: number;
+}
+
+/**
+ * Fixed packs with volume discounts off the base CREDIT_PRICE_CENTS.
+ * Unit prices are absolute so checkout stays predictable.
+ */
+export const CREDIT_PACKS: readonly CreditPack[] = [
+  { quantity: 5, unitCents: 49 },
+  { quantity: 20, unitCents: 39 },
+  { quantity: 50, unitCents: 35 },
+  { quantity: 100, unitCents: 29 },
+] as const;
+
+export function findCreditPack(quantity: number): CreditPack | null {
+  return CREDIT_PACKS.find((pack) => pack.quantity === quantity) ?? null;
+}
+
+/** Checkout pricing for a quantity — pack rate if matched, else base unit price. */
+export function priceForQuantity(quantity: number): {
+  unitCents: number;
+  totalCents: number;
+  pack: CreditPack | null;
+} {
+  const pack = findCreditPack(quantity);
+  const unitCents = pack?.unitCents ?? creditPriceCents();
+  return {
+    unitCents,
+    totalCents: unitCents * quantity,
+    pack,
+  };
 }
 
 async function ensureUserRow(clerkUserId: string): Promise<void> {
@@ -81,13 +118,18 @@ export async function getBalance(clerkUserId: string): Promise<number> {
 }
 
 /**
- * Atomically spend one credit before calling Cyanite.
+ * Atomically spend one credit before a similarity search.
+ * Owner accounts skip the debit (unlimited free matches).
  * Returns the new balance, or null if the user has none left.
  */
 export async function debitForMatch(
   clerkUserId: string,
   uploadId: string,
 ): Promise<number | null> {
+  if (isOwnerUser(clerkUserId)) {
+    return getBalance(clerkUserId);
+  }
+
   await ensureStarterGrant(clerkUserId);
 
   const rows = await sql`
@@ -111,11 +153,15 @@ export async function debitForMatch(
   return Number(rows[0].balance);
 }
 
-/** Refund a credit after a failed Cyanite match (does not re-grant starter). */
+/** Refund a credit after a failed match (does not re-grant starter). No-op for owners. */
 export async function refundMatch(
   clerkUserId: string,
   uploadId: string,
 ): Promise<number> {
+  if (isOwnerUser(clerkUserId)) {
+    return getBalance(clerkUserId);
+  }
+
   const rows = await sql`
     WITH credited AS (
       UPDATE user_credits

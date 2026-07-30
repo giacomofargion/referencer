@@ -2,6 +2,11 @@ import decodeAac from "@audio/decode-aac";
 import decodeMp3 from "@audio/decode-mp3";
 import { Essentia, EssentiaWASM } from "essentia.js";
 
+import {
+  DEFAULT_LOUDEST_WINDOW_SECONDS,
+  findLoudestWindowStartSeconds,
+  mixToMono,
+} from "@/lib/loudest-window";
 import type { FeatureVector } from "@/lib/types";
 
 // Band edges must match FREQUENCY_BANDS in types.ts and the browser worker.
@@ -214,53 +219,34 @@ function trimToLoudestWindow(
   right: Float32Array,
   sampleRate: number,
   windowSeconds: number,
-): { left: Float32Array; right: Float32Array } {
+): { left: Float32Array; right: Float32Array; startSeconds: number } {
   const windowLength = Math.floor(windowSeconds * sampleRate);
-  if (left.length <= windowLength) return { left, right };
-
-  // 1-second RMS scan, then pick the best contiguous window of blocks.
-  const blockLength = sampleRate;
-  const blockCount = Math.floor(left.length / blockLength);
-  const blockEnergies = new Array<number>(blockCount);
-  for (let b = 0; b < blockCount; b++) {
-    let sum = 0;
-    const offset = b * blockLength;
-    for (let i = 0; i < blockLength; i++) {
-      const l = left[offset + i];
-      const r = right[offset + i];
-      sum += l * l + r * r;
-    }
-    blockEnergies[b] = sum;
+  const startSeconds = findLoudestWindowStartSeconds(
+    mixToMono(left, right),
+    sampleRate,
+    windowSeconds,
+  );
+  if (left.length <= windowLength) {
+    return { left, right, startSeconds: 0 };
   }
-
-  const blocksPerWindow = Math.max(1, Math.floor(windowSeconds));
-  let windowSum = 0;
-  for (let b = 0; b < Math.min(blocksPerWindow, blockCount); b++) {
-    windowSum += blockEnergies[b];
-  }
-  let bestSum = windowSum;
-  let bestStart = 0;
-  for (let b = blocksPerWindow; b < blockCount; b++) {
-    windowSum += blockEnergies[b] - blockEnergies[b - blocksPerWindow];
-    if (windowSum > bestSum) {
-      bestSum = windowSum;
-      bestStart = b - blocksPerWindow + 1;
-    }
-  }
-
-  const start = bestStart * blockLength;
+  const start = Math.floor(startSeconds * sampleRate);
   return {
     left: left.subarray(start, start + windowLength),
     right: right.subarray(start, start + windowLength),
+    startSeconds,
   };
 }
 
-const PREVIEW_WINDOW_SECONDS = 20;
+export interface PreviewAnalysis {
+  features: FeatureVector;
+  /** Seconds into the iTunes preview where the loudest window begins. */
+  loudestStartSec: number;
+}
 
-/** Fetch a remote preview URL and return its feature vector. */
+/** Fetch a remote preview URL and return features + loudest-window offset. */
 export async function analyzePreviewUrl(
   previewUrl: string,
-): Promise<FeatureVector> {
+): Promise<PreviewAnalysis> {
   const response = await fetch(previewUrl);
   if (!response.ok) {
     throw new Error(`Preview fetch failed (${response.status})`);
@@ -271,7 +257,10 @@ export async function analyzePreviewUrl(
     left,
     right,
     sampleRate,
-    PREVIEW_WINDOW_SECONDS,
+    DEFAULT_LOUDEST_WINDOW_SECONDS,
   );
-  return extractFeatures(trimmed.left, trimmed.right, sampleRate);
+  return {
+    features: extractFeatures(trimmed.left, trimmed.right, sampleRate),
+    loudestStartSec: trimmed.startSeconds,
+  };
 }

@@ -21,6 +21,8 @@ export interface MatchResult {
   artworkUrl: string | null;
   genre: string;
   previewUrl: string;
+  /** Seconds into the iTunes preview to start A/B (loudest window). */
+  previewStartSec?: number | null;
   distanceScore: number;
   explanation: string;
   featureVector: FeatureVector;
