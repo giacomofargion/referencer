@@ -21,7 +21,15 @@ import { openBuyCreditsDialog } from "@/components/credits-balance";
 import { useAuthedFetch } from "@/hooks/use-authed-fetch";
 import { readApiJson, usePromptSignIn } from "@/hooks/use-prompt-sign-in";
 import { analyzeAudioFile } from "@/lib/analysis";
+import { classifyDiscogsGenre } from "@/lib/discogs-genre";
 import { encodeClipMp3 } from "@/lib/encode-clip";
+import {
+  MATCH_GENRES,
+  discogsLabelToGenre,
+  instrumentsFromDiscogsLabel,
+  isMatchGenre,
+  type MatchGenre,
+} from "@/lib/genres";
 import {
   rankBySonicSimilarity,
   type WeightPreset,
@@ -55,6 +63,9 @@ export function UploadCard() {
     name: string;
   } | null>(null);
   const [weightPreset, setWeightPreset] = useState<WeightPreset>("balanced");
+  const [genreOverride, setGenreOverride] = useState<MatchGenre | "">("");
+  const [detectedGenre, setDetectedGenre] = useState<MatchGenre | null>(null);
+  const [detectedLabel, setDetectedLabel] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>({ step: "idle" });
   const [activeIndex, setActiveIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -107,6 +118,9 @@ export function UploadCard() {
     setFile(candidate);
     setPhase({ step: "idle" });
     setWeightPreset("balanced");
+    setGenreOverride("");
+    setDetectedGenre(null);
+    setDetectedLabel(null);
     setActiveIndex(0);
     setLightboxOpen(false);
   }
@@ -127,6 +141,32 @@ export function UploadCard() {
       setWeightPreset("balanced");
       setActiveIndex(0);
       setLightboxOpen(false);
+
+      // Discogs-EffNet in the browser — drives Deezer/iTunes search terms.
+      let discogsLabel: string | null = null;
+      let genre: MatchGenre | null =
+        genreOverride && isMatchGenre(genreOverride) ? genreOverride : null;
+      try {
+        const tagged = await classifyDiscogsGenre(file);
+        discogsLabel = tagged.discogsLabel;
+        setDetectedLabel(tagged.discogsLabel);
+        const mapped = tagged.discogsLabel
+          ? discogsLabelToGenre(tagged.discogsLabel)
+          : null;
+        setDetectedGenre(mapped);
+        if (!genre && mapped) genre = mapped;
+      } catch (tagError) {
+        console.warn("Discogs genre tagging failed:", tagError);
+        toast.message(
+          "Couldn’t auto-detect genre — pick one below if matching fails.",
+        );
+      }
+      if (!genre) {
+        throw new Error(
+          "Pick a genre (auto-detect missed this track) and try again",
+        );
+      }
+
       const featureVector = await analyzeAudioFile(file);
 
       const clip = await encodeClipMp3(file).catch(() => {
@@ -189,10 +229,14 @@ export function UploadCard() {
       }
 
       setPhase({ step: "matching" });
+      const instruments = instrumentsFromDiscogsLabel(discogsLabel);
       const matchForm = new FormData();
       matchForm.append("uploadId", uploadId);
-      // Clip goes to the MERT worker for catalog ANN (first 30s used).
-      matchForm.append("audio", clip, "clip.mp3");
+      matchForm.append("genre", genre);
+      if (discogsLabel) matchForm.append("discogsLabel", discogsLabel);
+      if (instruments.length > 0) {
+        matchForm.append("instruments", instruments.join(","));
+      }
 
       const matchResponse = await authedFetch("/api/match", {
         method: "POST",
@@ -253,8 +297,8 @@ export function UploadCard() {
           <CardHeader>
             <CardTitle className="text-base">Upload client track</CardTitle>
             <CardDescription className="text-text-muted">
-              WAV or AIFF preferred. We&apos;ll find commercial tracks that sound
-              like yours, then rank them by how close the mix feels.
+              WAV or AIFF preferred. We detect genre with Discogs-EffNet in your
+              browser, search Deezer/iTunes, then rank by Essentia metering.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
@@ -291,6 +335,45 @@ export function UploadCard() {
               className="hidden"
               onChange={(event) => acceptFile(event.target.files?.[0])}
             />
+
+            <div className="flex flex-col gap-2">
+              <label
+                htmlFor="genre-override"
+                className="text-xs font-medium text-text-muted"
+              >
+                Genre{" "}
+                <span className="font-normal">
+                  (auto-detected on analyze; override if needed)
+                </span>
+              </label>
+              <select
+                id="genre-override"
+                disabled={busy}
+                value={genreOverride}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setGenreOverride(
+                    value && isMatchGenre(value) ? value : "",
+                  );
+                }}
+                className="h-9 rounded-md border border-border bg-surface-0 px-3 text-sm text-text-primary"
+              >
+                <option value="">
+                  {detectedGenre
+                    ? `Auto: ${detectedGenre}${
+                        detectedLabel?.includes("---")
+                          ? ` — ${detectedLabel.split("---").pop()}`
+                          : ""
+                      }`
+                    : "Auto-detect from mix"}
+                </option>
+                {MATCH_GENRES.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </div>
 
             <ProjectPicker
               value={phase.step === "done" ? phase.projectId : projectId}

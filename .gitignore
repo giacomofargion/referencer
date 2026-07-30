@@ -45,9 +45,10 @@ next-env.d.ts
 /workers/mert-embed/data/
 /workers/mert-embed/models/*.pb
 
-# Large Discogs TFJS shards (optional browser path)
+# Large Discogs TF.js shards (downloaded by scripts/download-discogs-tfjs.sh / prebuild)
 /public/models/discogs-genre/*.bin
 /public/models/discogs-genre/model.json
+# labels.json is small and committed
 
 # Kaggle embedding dump (multi-GB) — do not commit
 /archive/

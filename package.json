@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "bash scripts/download-discogs-tfjs.sh",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "models:discogs": "bash scripts/download-discogs-tfjs.sh",
     "mert:worker": "cd workers/mert-embed && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8091"
   },
   "dependencies": {

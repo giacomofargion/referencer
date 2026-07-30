@@ -4,35 +4,31 @@ import { NextResponse } from "next/server";
 import { analyzePreviewUrl } from "@/lib/analyze-server";
 import { debitForMatch, refundMatch } from "@/lib/credits";
 import { sql } from "@/lib/db";
+import { searchDeezerTracks, type PlatformTrack } from "@/lib/deezer";
 import { explainMatch } from "@/lib/explanations";
 import { isFeatureVector } from "@/lib/feature-vector";
+import {
+  genreDistancePenalty,
+  instrumentsFromDiscogsLabel,
+  isInGenreNeighborhood,
+  isMatchGenre,
+  searchQueriesForDiscovery,
+  type MatchGenre,
+} from "@/lib/genres";
 import { searchItunesSongs, type ItunesTrack } from "@/lib/itunes";
 import { pickStrictItunesMatch } from "@/lib/itunes-match";
 import { rankBySonicSimilarity } from "@/lib/matching";
-import { filterHitsByDominantGenre } from "@/lib/mert-genre-filter";
-import {
-  discoverSimilarViaMert,
-  isMertDiscoveryReady,
-  isMertWorkerConfigured,
-  type MertSimilarHit,
-} from "@/lib/mert-worker";
 import type { FeatureVector } from "@/lib/types";
 
 export const maxDuration = 60;
 
 /** Cap new Essentia analyses per request so we stay under maxDuration. */
-const MAX_HYDRATIONS = 12;
+const MAX_HYDRATIONS = 14;
 /** Rank against at most this many analyzed refs. */
 const MAX_POOL = 60;
-/** Over-fetch ANN neighbors so genre filtering still leaves a solid pool. */
-const MERT_ANN_LIMIT = 80;
 const TOP_RESULTS = 8;
-
-/** When true, keep MERT ANN order instead of Essentia metering re-rank (easy A/B). */
-function skipEssentiaRerank(): boolean {
-  const raw = process.env.MATCH_SKIP_ESSENTIA_RERANK?.trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
-}
+const QUERIES_PER_SOURCE = 3;
+const RESULTS_PER_QUERY = 12;
 
 interface CachedReference {
   id: string;
@@ -47,33 +43,53 @@ interface CachedReference {
   feature_vector: FeatureVector;
 }
 
+function parseInstrumentsField(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.map((v) => String(v).trim()).filter(Boolean).slice(0, 4);
+  }
+  const text = String(raw ?? "").trim();
+  if (!text) return [];
+  return text
+    .split(/[,|]/)
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
 async function parseMatchRequest(request: Request): Promise<{
   uploadId: string;
-  audio: ArrayBuffer | null;
-  audioContentType: string | null;
+  genre: string;
+  discogsLabel: string | null;
+  instruments: string[];
 }> {
   const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.includes("multipart/form-data")) {
-    return { uploadId: "", audio: null, audioContentType: null };
+  if (contentType.includes("multipart/form-data")) {
+    const form = await request.formData();
+    return {
+      uploadId: String(form.get("uploadId") ?? "").trim(),
+      genre: String(form.get("genre") ?? "").trim(),
+      discogsLabel: String(form.get("discogsLabel") ?? "").trim() || null,
+      instruments: parseInstrumentsField(form.get("instruments")),
+    };
   }
 
-  const form = await request.formData();
-  const uploadId = String(form.get("uploadId") ?? "").trim();
-  const file = form.get("audio");
-  let audio: ArrayBuffer | null = null;
-  let audioContentType: string | null = null;
-  if (file instanceof File && file.size > 0) {
-    audio = await file.arrayBuffer();
-    audioContentType = file.type || null;
-  }
-
-  return { uploadId, audio, audioContentType };
+  const body = (await request.json().catch(() => null)) as {
+    uploadId?: string;
+    genre?: string;
+    discogsLabel?: string | null;
+    instruments?: string[] | string;
+  } | null;
+  return {
+    uploadId: String(body?.uploadId ?? "").trim(),
+    genre: String(body?.genre ?? "").trim(),
+    discogsLabel: body?.discogsLabel?.trim() || null,
+    instruments: parseInstrumentsField(body?.instruments),
+  };
 }
 
 /**
- * Match a client upload against commercial references.
- * Primary: MERT ANN in the embed worker (R2/local catalog) → iTunes hydrate → Essentia re-rank.
- * Fallback: existing Essentia-analyzed reference_tracks when the worker/catalog is down.
+ * Discogs genre → Deezer/iTunes search → Essentia metering re-rank.
+ * No hosted MERT worker required.
  */
 export async function POST(request: Request) {
   const { userId } = await auth();
@@ -81,16 +97,26 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { uploadId, audio, audioContentType } = await parseMatchRequest(request);
+  const {
+    uploadId,
+    genre: genreRaw,
+    discogsLabel,
+    instruments: instrumentsRaw,
+  } = await parseMatchRequest(request);
   if (!uploadId) {
     return NextResponse.json({ error: "uploadId required" }, { status: 400 });
   }
-  if (!audio) {
+  if (!isMatchGenre(genreRaw)) {
     return NextResponse.json(
-      { error: "Audio clip missing — try analyzing the track again" },
+      { error: "Valid genre required (from Discogs tagging or manual pick)" },
       { status: 400 },
     );
   }
+  const genre: MatchGenre = genreRaw;
+  const instruments =
+    instrumentsRaw.length > 0
+      ? instrumentsRaw
+      : instrumentsFromDiscogsLabel(discogsLabel);
 
   const uploads = await sql`
     SELECT id, title, feature_vector, project_id
@@ -125,64 +151,61 @@ export async function POST(request: Request) {
     );
   }
 
-  let pool: CachedReference[];
+  let pool: CachedReference[] = [];
   let discoveryNote: string;
-  /** MERT cosine distances keyed by iTunes id — used when skipping Essentia re-rank. */
-  let mertDistanceByItunesId = new Map<number, number>();
-  let usedMert = false;
 
   try {
-    const useMert =
-      isMertWorkerConfigured() && (await isMertDiscoveryReady());
+    const queries = searchQueriesForDiscovery({
+      genre,
+      discogsLabel,
+      instruments,
+    }).slice(0, QUERIES_PER_SOURCE);
 
-    if (useMert) {
-      usedMert = true;
-      const discovery = await discoverSimilarViaMert({
-        audio,
-        contentType: audioContentType,
-        limit: MERT_ANN_LIMIT,
-      });
-      // Worker already genre-filters via Discogs-EffNet when available. Neighbor
-      // vote remains as a soft fallback if the classifier was unavailable.
-      const mertHits = discovery.hits;
-      const genreFiltered = discovery.predictedGenre
-        ? mertHits
-        : filterHitsByDominantGenre(mertHits);
-      const hydrated = await hydrateMertResults(genreFiltered);
-      mertDistanceByItunesId = new Map(
-        hydrated.map((h) => [h.itunesTrackId, h.mertDistance]),
+    const platformHits = await collectPlatformCandidates(
+      queries,
+      genre,
+      discogsLabel,
+    );
+    const hydrated = await hydratePlatformTracks(
+      platformHits,
+      genre,
+      discogsLabel,
+    );
+    const byId = new Map(
+      (
+        await loadReferencesByTrackIds(
+          new Set(hydrated.map((h) => h.itunesTrackId)),
+        )
+      ).map((row) => [row.itunes_track_id, row]),
+    );
+    pool = hydrated
+      .map((h) => byId.get(h.itunesTrackId))
+      .filter((row): row is CachedReference => Boolean(row))
+      .filter((row) =>
+        isInGenreNeighborhood(genre, row.genre, discogsLabel),
       );
-      const byItunesId = new Map(
-        (
-          await loadReferencesByTrackIds(
-            new Set(hydrated.map((h) => h.itunesTrackId)),
-          )
-        ).map((row) => [row.itunes_track_id, row]),
-      );
-      // Preserve ANN order (DB ANY() does not).
-      pool = hydrated
-        .map((h) => byItunesId.get(h.itunesTrackId))
-        .filter((row): row is CachedReference => Boolean(row));
 
-      const genreLabel =
-        discovery.predictedGenre?.trim() ||
-        genreFiltered[0]?.genre?.trim() ||
-        mertHits[0]?.genre?.trim() ||
-        "mixed";
-      const genreSource = discovery.predictedGenre
-        ? `Discogs→${genreLabel}`
-        : `${genreLabel} neighbor vote`;
-      const orderNote = skipEssentiaRerank()
-        ? "MERT order (Essentia re-rank off)"
-        : "re-ranked by your metering profile";
-      discoveryNote = `MERT catalog neighbors (${genreFiltered.length} hits, ${genreSource}) — ${orderNote}.`;
-    } else {
-      pool = await loadRecentReferences(MAX_POOL);
-      const reason = !isMertWorkerConfigured()
-        ? "MERT worker not configured"
-        : "MERT catalog unavailable";
-      discoveryNote = `Fallback cache (${reason}) — ranked ${pool.length} refs by metering.`;
+    // If platform hydrate was thin, top up from same-genre cache (analyze cache only).
+    if (pool.length < 8) {
+      const cached = await loadGenreCachedReferences(genre, MAX_POOL);
+      const seen = new Set(pool.map((p) => p.itunes_track_id));
+      for (const row of cached) {
+        if (seen.has(row.itunes_track_id)) continue;
+        if (!isInGenreNeighborhood(genre, row.genre, discogsLabel)) continue;
+        pool.push(row);
+        seen.add(row.itunes_track_id);
+        if (pool.length >= MAX_POOL) break;
+      }
     }
+
+    const styleNote = discogsLabel?.includes("---")
+      ? discogsLabel.split("---", 2)[1]?.trim()
+      : null;
+    const instrumentNote =
+      instruments.length > 0 ? ` · ${instruments.slice(0, 2).join("/")}` : "";
+    discoveryNote = styleNote
+      ? `Discogs “${styleNote}”${instrumentNote} → gated Deezer/iTunes → Essentia (${pool.length} candidates).`
+      : `Discogs ${genre}${instrumentNote} → gated Deezer/iTunes → Essentia (${pool.length} candidates).`;
   } catch (error) {
     console.error("Discovery failed:", error);
     await refundMatch(userId, uploadId).catch((refundError) => {
@@ -199,24 +222,25 @@ export async function POST(request: Request) {
       matches: [],
       clientFeatures,
       discoveryNote:
-        "No playable references found. Pack/upload the MERT catalog and start the embed worker.",
+        "No playable references found for this genre — try again in a moment.",
     });
   }
 
-  const ranked =
-    usedMert && skipEssentiaRerank()
-      ? pool.slice(0, TOP_RESULTS).map((item) => ({
-          item,
-          features: item.feature_vector,
-          distance: mertDistanceByItunesId.get(item.itunes_track_id) ?? 0,
-        }))
-      : rankBySonicSimilarity(
-          clientFeatures,
-          pool.map((row) => ({
-            item: row,
-            features: row.feature_vector,
-          })),
-        ).slice(0, TOP_RESULTS);
+  const ranked = rankBySonicSimilarity(
+    clientFeatures,
+    pool.map((row) => ({
+      item: row,
+      features: row.feature_vector,
+    })),
+  )
+    .map((hit) => ({
+      ...hit,
+      distance:
+        hit.distance +
+        genreDistancePenalty(genre, hit.item.genre, discogsLabel),
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, TOP_RESULTS);
 
   await sql`DELETE FROM matches WHERE client_upload_id = ${uploadId}`;
 
@@ -270,59 +294,171 @@ export async function POST(request: Request) {
   });
 }
 
-async function hydrateMertResults(
-  hits: MertSimilarHit[],
-): Promise<Array<{ itunesTrackId: number; mertDistance: number }>> {
-  const ordered: Array<{ itunesTrackId: number; mertDistance: number }> = [];
+async function collectPlatformCandidates(
+  queries: string[],
+  genre: MatchGenre,
+  discogsLabel: string | null,
+): Promise<PlatformTrack[]> {
+  const merged: PlatformTrack[] = [];
+  const seen = new Set<string>();
+
+  for (const query of queries) {
+    const deezer = await searchDeezerTracks(
+      query,
+      RESULTS_PER_QUERY,
+      genre,
+    ).catch((error) => {
+      console.warn("Deezer search failed:", error);
+      return [] as PlatformTrack[];
+    });
+    for (const track of deezer) {
+      const key = `${track.artist.toLowerCase()}|${track.title.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      // Deezer often lacks genre; keep and rely on iTunes hydrate + hard gate.
+      if (
+        track.genre &&
+        !isInGenreNeighborhood(genre, track.genre, discogsLabel)
+      ) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(track);
+    }
+
+    const itunes = await searchItunesSongs(query, RESULTS_PER_QUERY).catch(
+      (error) => {
+        console.warn("iTunes search failed:", error);
+        return [] as ItunesTrack[];
+      },
+    );
+    for (const track of itunes) {
+      const key = `${track.artist.toLowerCase()}|${track.title.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      const platformGenre = track.genre || genre;
+      if (!isInGenreNeighborhood(genre, platformGenre, discogsLabel)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push({
+        cacheKey: `itunes:${track.itunesTrackId}`,
+        deezerId: null,
+        itunesTrackId: track.itunesTrackId,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        artworkUrl: track.artworkUrl,
+        genre: platformGenre,
+        previewUrl: track.previewUrl,
+      });
+    }
+  }
+
+  return merged.slice(0, MAX_POOL);
+}
+
+/**
+ * Resolve to iTunes ids for the existing reference_tracks cache key, analyze
+ * previews (Deezer or iTunes URL), upsert features.
+ */
+async function hydratePlatformTracks(
+  hits: PlatformTrack[],
+  fallbackGenre: MatchGenre,
+  discogsLabel: string | null,
+): Promise<Array<{ itunesTrackId: number }>> {
+  const ordered: Array<{ itunesTrackId: number }> = [];
   const seen = new Set<number>();
   let analyzed = 0;
 
   for (const hit of hits) {
     if (analyzed >= MAX_HYDRATIONS && ordered.length >= TOP_RESULTS) break;
 
-    const term = [hit.artist, hit.title].filter(Boolean).join(" ").trim();
-    if (!term) continue;
+    let itunesId = hit.itunesTrackId;
+    let previewUrl = hit.previewUrl;
+    let title = hit.title;
+    let artist = hit.artist;
+    let album = hit.album;
+    let artworkUrl = hit.artworkUrl;
+    let genre = hit.genre || fallbackGenre;
+    let itunesGenre = hit.genre || fallbackGenre;
 
-    const itunesHits = await searchItunesSongs(term, 8).catch(() => []);
-    const track = pickStrictItunesMatch(
-      { title: hit.title, artist: hit.artist },
-      itunesHits,
-    );
-    if (!track?.previewUrl) continue;
-    if (seen.has(track.itunesTrackId)) continue;
+    if (itunesId == null) {
+      const term = [hit.artist, hit.title].filter(Boolean).join(" ").trim();
+      if (!term) continue;
+      const itunesHits = await searchItunesSongs(term, 8).catch(() => []);
+      const matched = pickStrictItunesMatch(
+        { title: hit.title, artist: hit.artist },
+        itunesHits,
+      );
+      if (matched) {
+        itunesId = matched.itunesTrackId;
+        // Prefer Deezer preview when we already have one (often more reliable).
+        previewUrl = hit.previewUrl || matched.previewUrl;
+        title = matched.title;
+        artist = matched.artist;
+        album = matched.album ?? album;
+        artworkUrl = matched.artworkUrl ?? artworkUrl;
+        genre = matched.genre || genre;
+        itunesGenre = matched.itunesGenre || itunesGenre;
+      } else {
+        // No iTunes id → skip (schema requires itunes_track_id).
+        continue;
+      }
+    }
+
+    if (seen.has(itunesId)) continue;
+    // Drop loudness twins from the wrong neighborhood before spending analyze budget.
+    if (!isInGenreNeighborhood(fallbackGenre, genre, discogsLabel)) {
+      continue;
+    }
 
     const existing = await sql`
       SELECT id, preview_start_sec FROM reference_tracks
-      WHERE itunes_track_id = ${track.itunesTrackId} AND feature_vector IS NOT NULL
+      WHERE itunes_track_id = ${itunesId} AND feature_vector IS NOT NULL
       LIMIT 1
     `;
 
     if (existing.length === 0 || existing[0].preview_start_sec == null) {
       if (analyzed >= MAX_HYDRATIONS) continue;
       try {
-        const { features, loudestStartSec } = await analyzePreviewUrl(
-          track.previewUrl,
+        const { features, loudestStartSec } = await analyzePreviewUrl(previewUrl);
+        await upsertReference(
+          {
+            itunesTrackId: itunesId,
+            title,
+            artist,
+            album,
+            artworkUrl,
+            genre,
+            itunesGenre,
+            previewUrl,
+          },
+          features,
+          loudestStartSec,
         );
-        await upsertReference(track, features, loudestStartSec);
         analyzed += 1;
       } catch {
-        // Skip hydrate failures; keep going through the ANN list.
         continue;
       }
     }
 
-    seen.add(track.itunesTrackId);
-    ordered.push({
-      itunesTrackId: track.itunesTrackId,
-      mertDistance: hit.distance,
-    });
+    seen.add(itunesId);
+    ordered.push({ itunesTrackId: itunesId });
   }
 
   return ordered;
 }
 
 async function upsertReference(
-  track: ItunesTrack,
+  track: {
+    itunesTrackId: number;
+    title: string;
+    artist: string;
+    album: string | null;
+    artworkUrl: string | null;
+    genre: string;
+    itunesGenre: string;
+    previewUrl: string;
+  },
   features: FeatureVector,
   loudestStartSec: number,
 ): Promise<void> {
@@ -365,12 +501,19 @@ async function loadReferencesByTrackIds(
   return mapCached(rows);
 }
 
-async function loadRecentReferences(limit: number): Promise<CachedReference[]> {
+async function loadGenreCachedReferences(
+  genre: MatchGenre,
+  limit: number,
+): Promise<CachedReference[]> {
   const rows = await sql`
     SELECT id, itunes_track_id, title, artist, album, artwork_url,
            genre, preview_url, preview_start_sec, feature_vector
     FROM reference_tracks
     WHERE feature_vector IS NOT NULL
+      AND (
+        genre ILIKE ${"%" + genre + "%"}
+        OR itunes_genre ILIKE ${"%" + genre + "%"}
+      )
     ORDER BY analyzed_at DESC NULLS LAST
     LIMIT ${limit}
   `;
