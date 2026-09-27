@@ -211,8 +211,7 @@ export function ReferencesLightbox({
             <div className="relative flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-8 sm:py-8">
               {matches.length === 0 ? (
                 <p className="text-sm text-text-secondary">
-                  No matches this run — similarity results vary, so try
-                  analyzing again.
+                  No references cleared the style and tone bar for this track.
                 </p>
               ) : (
                 // Mobile: single listening-first column. Desktop: player | metering.

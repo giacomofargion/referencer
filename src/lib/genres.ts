@@ -232,6 +232,22 @@ export function isInGenreNeighborhood(
 }
 
 /**
+ * Where a discovery query sits relative to the requested style.
+ * Style hits stay closer than a parent-genre or related-genre search,
+ * even when the platform later labels both tracks with a coarse genre.
+ */
+export type DiscoveryQueryKind =
+  | "style"
+  | "style-instrument"
+  | "genre"
+  | "related";
+
+export interface DiscoveryQuery {
+  query: string;
+  kind: DiscoveryQueryKind;
+}
+
+/**
  * Text queries for Deezer / iTunes.
  * Prefer Discogs style; avoid related-parent spam when a style is known.
  */
@@ -239,31 +255,37 @@ export function searchQueriesForDiscovery(input: {
   genre: MatchGenre;
   discogsLabel?: string | null;
   instruments?: string[];
-}): string[] {
-  const queries: string[] = [];
+}): DiscoveryQuery[] {
+  const queries: DiscoveryQuery[] = [];
   const style = discogsStyle(input.discogsLabel);
   const instruments = (input.instruments ?? []).filter(Boolean).slice(0, 2);
 
   if (style) {
-    queries.push(style);
+    queries.push({ query: style, kind: "style" });
     for (const instrument of instruments) {
-      queries.push(`${style} ${instrument}`);
+      queries.push({
+        query: `${style} ${instrument}`,
+        kind: "style-instrument",
+      });
     }
     // Parent as last-resort breadth, not as a peer of the style.
-    queries.push(input.genre);
+    queries.push({ query: input.genre, kind: "genre" });
   } else {
-    queries.push(input.genre);
+    queries.push({ query: input.genre, kind: "genre" });
     for (const instrument of instruments) {
-      queries.push(`${input.genre} ${instrument}`);
+      queries.push({
+        query: `${input.genre} ${instrument}`,
+        kind: "style-instrument",
+      });
     }
     for (const related of relatedGenres(input.genre).slice(0, 1)) {
-      queries.push(related);
+      queries.push({ query: related, kind: "related" });
     }
   }
 
   const seen = new Set<string>();
-  return queries.filter((q) => {
-    const key = q.toLowerCase();
+  return queries.filter((entry) => {
+    const key = entry.query.toLowerCase();
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -271,28 +293,87 @@ export function searchQueriesForDiscovery(input: {
 }
 
 /**
- * Soft ranking nudge inside an already hard-gated pool.
- * Prefer exact style / preferred genre over related aliases.
+ * 0 = this search was aimed at the requested style.
+ * Higher = the track only showed up because the query got broader.
  */
-export function genreDistancePenalty(
+export function queryCloseness(kind: DiscoveryQueryKind): number {
+  switch (kind) {
+    case "style":
+      return 0;
+    case "style-instrument":
+      return 0.1;
+    case "genre":
+      return 0.5;
+    case "related":
+      return 0.6;
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * 0 = platform genre names the Discogs style or the preferred parent.
+ * Listeners treat genre as its own similarity axis (Siedenburg et al.),
+ * so this stays large enough that a tone match cannot erase it.
+ */
+export function genreLabelAffinity(
   preferred: MatchGenre,
   candidateGenre: string,
   discogsLabel?: string | null,
 ): number {
   const raw = candidateGenre.trim();
-  if (!raw) return 0.15;
+  if (!raw) return 1;
   const lower = raw.toLowerCase();
 
   const style = discogsStyle(discogsLabel);
   if (style && textContainsToken(lower, style)) return 0;
-  if (textContainsToken(lower, preferred)) return 0;
+  if (textContainsToken(lower, preferred)) return 0.2;
 
   for (const alias of GENRE_ALIASES[preferred]) {
-    if (textContainsToken(lower, alias)) return 0.01;
+    if (textContainsToken(lower, alias)) return 0.45;
   }
   for (const related of relatedGenres(preferred)) {
-    if (textMatchesGenre(raw, related)) return 0.04;
+    if (textMatchesGenre(raw, related)) return 0.55;
   }
-  // Should rarely hit when hard gate is applied first.
-  return 0.12;
+  return 1;
+}
+
+/**
+ * Blend how the track was found with how it is labeled.
+ * A Deep House search hit labeled "Dance" stays close.
+ * A parent-genre search hit does not, even when its tone matches.
+ */
+export function combineGenreCloseness(
+  kind: DiscoveryQueryKind,
+  labelAffinity: number,
+): number {
+  const label = Math.min(1, Math.max(0, labelAffinity));
+  return Math.min(1, 0.6 * queryCloseness(kind) + 0.4 * label);
+}
+
+/** Closest query wins when the same track is returned by several searches. */
+export function closerQueryKind(
+  current: DiscoveryQueryKind,
+  next: DiscoveryQueryKind,
+): DiscoveryQueryKind {
+  return queryCloseness(next) < queryCloseness(current) ? next : current;
+}
+
+/** Best-effort parent genre for older sessions that did not store closeness. */
+export function inferPreferredGenre(genres: string[]): MatchGenre | null {
+  let best: MatchGenre | null = null;
+  let bestCount = 0;
+  for (const genre of MATCH_GENRES) {
+    let count = 0;
+    for (const candidate of genres) {
+      if (textMatchesGenre(candidate, genre)) count += 1;
+    }
+    if (count > bestCount) {
+      best = genre;
+      bestCount = count;
+    }
+  }
+  return best;
 }

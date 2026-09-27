@@ -9,7 +9,7 @@ import { ReferencesLightbox } from "@/components/references-lightbox";
 import { SaveReferenceButton } from "@/components/save-reference-button";
 import { Button } from "@/components/ui/button";
 import {
-  rankBySonicSimilarity,
+  orderDisplayedMatches,
   type WeightPreset,
 } from "@/lib/matching";
 import type { FeatureVector } from "@/lib/types";
@@ -91,15 +91,7 @@ export function SessionResults({
   }, [uploadId]);
 
   const displayedMatches = useMemo(() => {
-    if (weightPreset === "balanced") return matches;
-    return rankBySonicSimilarity(
-      clientFeatures,
-      matches.map((m) => ({ item: m, features: m.featureVector })),
-      weightPreset,
-    ).map((hit) => ({
-      ...hit.item,
-      distanceScore: hit.distance,
-    }));
+    return orderDisplayedMatches(clientFeatures, matches, weightPreset);
   }, [matches, clientFeatures, weightPreset]);
 
   const safeActiveIndex =

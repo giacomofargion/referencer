@@ -1,15 +1,10 @@
 import {
-  BEAT_HIST_PEAKS,
-  FREQUENCY_BANDS,
-  HPCP_BINS,
-  MFCC_COEFFS,
-  SPECTRAL_CONTRAST_BANDS,
-  type FeatureVector,
-  type StoredFingerprint,
-} from "@/lib/types";
+  genreLabelAffinity,
+  inferPreferredGenre,
+} from "@/lib/genres";
+import { FREQUENCY_BANDS, type FeatureVector, type StoredFingerprint } from "@/lib/types";
 import {
   getAggregateFeatures,
-  getEmbedding,
   getFeatureWindows,
 } from "@/lib/feature-vector";
 
@@ -56,43 +51,44 @@ export type WeightPreset = "balanced" | "tone" | "loudness";
 
 export const WEIGHT_PRESETS: Record<WeightPreset, Weights> = {
   balanced: {
-    loudness: 1.2,
-    dynamicRange: 1.0,
-    plr: 1.0,
-    tempo: 1.0,
-    onsets: 0.8,
-    stereoWidth: 0.8,
-    band: 1.4,
-    timbre: 1.2,
-    chroma: 0.9,
-    rhythm: 0.8,
-    dynamicsExt: 0.7,
+    // Loudness stays small: an unmastered mix is supposed to sit under a master.
+    loudness: 0.3,
+    dynamicRange: 0.55,
+    plr: 0.5,
+    tempo: 0.45,
+    onsets: 0.35,
+    stereoWidth: 0.55,
+    band: 4.4,
+    timbre: 2.2,
+    chroma: 0.35,
+    rhythm: 0.4,
+    dynamicsExt: 0.4,
   },
   tone: {
-    loudness: 0.5,
-    dynamicRange: 0.6,
-    plr: 0.5,
-    tempo: 0.8,
-    onsets: 0.6,
-    stereoWidth: 0.8,
-    band: 2.6,
-    timbre: 2.0,
-    chroma: 1.4,
-    rhythm: 0.5,
-    dynamicsExt: 0.4,
+    loudness: 0.15,
+    dynamicRange: 0.25,
+    plr: 0.2,
+    tempo: 0.3,
+    onsets: 0.2,
+    stereoWidth: 0.45,
+    band: 5.2,
+    timbre: 2.6,
+    chroma: 0.7,
+    rhythm: 0.2,
+    dynamicsExt: 0.15,
   },
   loudness: {
     loudness: 2.4,
-    dynamicRange: 1.8,
-    plr: 1.8,
-    tempo: 0.6,
-    onsets: 0.5,
-    stereoWidth: 0.5,
-    band: 0.8,
-    timbre: 0.5,
-    chroma: 0.3,
-    rhythm: 0.4,
-    dynamicsExt: 1.6,
+    dynamicRange: 1.6,
+    plr: 1.6,
+    tempo: 0.35,
+    onsets: 0.25,
+    stereoWidth: 0.35,
+    band: 1.4,
+    timbre: 0.6,
+    chroma: 0.2,
+    rhythm: 0.25,
+    dynamicsExt: 1.2,
   },
 };
 
@@ -102,11 +98,23 @@ export const WEIGHT_PRESET_LABELS: Record<WeightPreset, string> = {
   loudness: "Match loudness",
 };
 
-/** Fusion weights when both sides have a Discogs embedding. */
-const SONIC_ALPHA = 0.7;
-const EMBED_BETA = 0.3;
-
 export type WeightMultipliers = Partial<Record<keyof Weights, number>>;
+
+/**
+ * Share of the published score that is genre closeness rather than tone.
+ * A perfect tone match in a broader genre still sorts behind a decent
+ * match that was actually searched in the requested style.
+ */
+export const GENRE_FIT_WEIGHT = 0.62;
+
+/**
+ * Reject a candidate when either axis is past these caps.
+ * Genre is capped on its own so a tone twin from a far genre cannot
+ * sneak in by having a tiny sonic distance. Tone is capped on its own
+ * so the right genre cannot excuse a different record.
+ */
+export const MAX_SONIC_DISTANCE = 0.24;
+export const MAX_GENRE_CLOSENESS = 0.62;
 
 function tempoDistance(a: number, b: number): number {
   const direct = Math.abs(a - b);
@@ -138,269 +146,322 @@ function applyMultipliers(
   return out;
 }
 
-/** Flatten a FeatureVector into weighted scalar dims for distance math. */
-function flattenFeatures(
-  f: FeatureVector,
-  weights: Weights,
-): { values: number[]; weights: number[] } {
-  const values: number[] = [];
-  const wts: number[] = [];
-
-  const push = (value: number | undefined, weight: number) => {
-    if (!isNumber(value)) {
-      values.push(Number.NaN); // marked missing — filled after pool stats
-      wts.push(weight);
-      return;
-    }
-    values.push(value);
-    wts.push(weight);
-  };
-
-  push(f.integratedLoudnessLufs, weights.loudness);
-  push(f.loudnessRangeDb, weights.dynamicRange);
-  push(f.plrDb, weights.plr);
-  push(f.tempoBpm, weights.tempo);
-  push(f.onsetRate, weights.onsets);
-  push(f.stereoWidth, weights.stereoWidth);
-
-  for (let i = 0; i < FREQUENCY_BANDS.length; i++) {
-    push(
-      f.frequencyBandEnergies[i] ?? 0,
-      weights.band * (BAND_EMPHASIS[i] ?? 1),
-    );
-  }
-
-  // Fixed-arity slots so short/long arrays cannot shift later dimensions.
-  const pushSlots = (
-    arr: number[] | undefined,
-    length: number,
-    weight: number,
-  ) => {
-    for (let i = 0; i < length; i++) push(arr?.[i], weight);
-  };
-
-  pushSlots(f.mfccMean, MFCC_COEFFS, weights.timbre / MFCC_COEFFS);
-  pushSlots(f.mfccStd, MFCC_COEFFS, (weights.timbre * 0.5) / MFCC_COEFFS);
-
-  push(f.spectralCentroid, weights.timbre);
-  push(f.spectralRolloff, weights.timbre);
-  push(f.spectralFlux, weights.rhythm);
-  push(f.spectralFlatness, weights.timbre);
-  pushSlots(
-    f.spectralContrast,
-    SPECTRAL_CONTRAST_BANDS,
-    weights.timbre / SPECTRAL_CONTRAST_BANDS,
-  );
-  push(f.zeroCrossingRate, weights.rhythm);
-
-  pushSlots(f.hpcp, HPCP_BINS, weights.chroma / HPCP_BINS);
-
-  for (let i = 0; i < BEAT_HIST_PEAKS; i++) {
-    push(f.beatHistBpms?.[i], weights.rhythm * 0.5);
-    push(f.beatHistWeights?.[i], weights.rhythm * 0.5);
-  }
-
-  push(f.rmsMean, weights.dynamicsExt);
-  push(f.rmsStd, weights.dynamicsExt);
-  push(f.crestFactor, weights.dynamicsExt);
-  push(f.dynamicComplexity, weights.dynamicsExt);
-
-  return { values, weights: wts };
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(1, Math.max(0, value));
 }
 
-function poolMeanStd(column: number[]): { mean: number; std: number } {
-  const present = column.filter((v) => Number.isFinite(v));
-  if (present.length === 0) return { mean: 0, std: 1 };
-  let sum = 0;
-  for (const v of present) sum += v;
-  const mean = sum / present.length;
-  let varSum = 0;
-  for (const v of present) {
-    const d = v - mean;
-    varSum += d * d;
-  }
-  const std = Math.sqrt(varSum / present.length);
-  return { mean, std: std > 1e-9 ? std : 1 };
+function unitDistance(delta: number, scale: number): number {
+  if (!Number.isFinite(delta) || scale <= 0) return 1;
+  return Math.min(1, Math.abs(delta) / scale);
 }
 
-function zscoreRow(
-  values: number[],
-  stats: Array<{ mean: number; std: number }>,
-): number[] {
-  return values.map((v, i) => {
-    if (!Number.isFinite(v)) return 0; // missing → pool center
-    const s = stats[i];
-    // Absent / malformed pool stats must not throw or yield NaN distances.
-    if (
-      !s ||
-      !Number.isFinite(s.mean) ||
-      !Number.isFinite(s.std) ||
-      s.std < 1e-9
-    ) {
-      return 0;
-    }
-    return (v - s.mean) / s.std;
-  });
-}
-
-function weightedCosineDistance(
-  a: number[],
-  b: number[],
-  weights: number[],
-): number {
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    const w = Math.sqrt(Math.max(weights[i], 0));
-    const av = a[i] * w;
-    const bv = b[i] * w;
-    dot += av * bv;
-    na += av * av;
-    nb += bv * bv;
-  }
-  if (na < 1e-12 || nb < 1e-12) return 1;
-  const cos = dot / (Math.sqrt(na) * Math.sqrt(nb));
-  return 1 - Math.max(-1, Math.min(1, cos));
-}
-
-function weightedEuclideanDistance(
-  a: number[],
-  b: number[],
-  weights: number[],
-): number {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    const d = a[i] - b[i];
-    sum += weights[i] * d * d;
-  }
-  return Math.sqrt(sum);
-}
-
-function embeddingCosineDistance(a: number[], b: number[]): number {
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
+function meanAbsOverlap(
+  a: number[] | undefined,
+  b: number[] | undefined,
+): number | null {
+  if (!a || !b || a.length === 0 || b.length === 0) return null;
   const n = Math.min(a.length, b.length);
+  let sum = 0;
+  let count = 0;
   for (let i = 0; i < n; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
+    if (!isNumber(a[i]) || !isNumber(b[i])) continue;
+    sum += Math.abs(a[i] - b[i]);
+    count += 1;
   }
-  if (na < 1e-12 || nb < 1e-12) return 1;
-  return 1 - dot / (Math.sqrt(na) * Math.sqrt(nb));
+  return count === 0 ? null : sum / count;
 }
 
 /**
- * Distance between two fingerprints: average aligned window distance,
- * falling back to aggregate when window counts differ wildly.
+ * One sonic axis on a fixed scale (0 = same, 1 = far).
+ * Scales are in the feature's own units so a cutoff means the same
+ * thing on every search. Pool z-scoring cannot do that: a weak pool
+ * shrinks its own distances and everything looks acceptable.
  */
-function fingerprintDistance(
+function pushAxis(
+  axes: Array<{ distance: number; weight: number }>,
+  distance: number | null,
+  weight: number,
+) {
+  if (distance == null || !Number.isFinite(distance) || weight <= 0) return;
+  axes.push({ distance: clamp01(distance), weight });
+}
+
+function bandDistance(a: number[], b: number[]): number {
+  let weighted = 0;
+  let weightSum = 0;
+  const n = Math.min(FREQUENCY_BANDS.length, a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const emphasis = BAND_EMPHASIS[i] ?? 1;
+    weighted += emphasis * Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+    weightSum += emphasis;
+  }
+  if (weightSum === 0) return 0;
+  // 0.18 average absolute band share is a different tonal balance.
+  return unitDistance(weighted / weightSum, 0.18);
+}
+
+function timbreDistance(a: FeatureVector, b: FeatureVector): number | null {
+  const parts: number[] = [];
+  const mfcc = meanAbsOverlap(a.mfccMean, b.mfccMean);
+  if (mfcc != null) parts.push(unitDistance(mfcc, 12));
+  const mfccStd = meanAbsOverlap(a.mfccStd, b.mfccStd);
+  if (mfccStd != null) parts.push(unitDistance(mfccStd, 6));
+  if (isNumber(a.spectralCentroid) && isNumber(b.spectralCentroid)) {
+    parts.push(unitDistance(a.spectralCentroid - b.spectralCentroid, 1800));
+  }
+  if (isNumber(a.spectralRolloff) && isNumber(b.spectralRolloff)) {
+    parts.push(unitDistance(a.spectralRolloff - b.spectralRolloff, 2500));
+  }
+  if (isNumber(a.spectralFlatness) && isNumber(b.spectralFlatness)) {
+    parts.push(unitDistance(a.spectralFlatness - b.spectralFlatness, 0.25));
+  }
+  const contrast = meanAbsOverlap(a.spectralContrast, b.spectralContrast);
+  if (contrast != null) parts.push(unitDistance(contrast, 8));
+  if (parts.length === 0) return null;
+  return parts.reduce((sum, value) => sum + value, 0) / parts.length;
+}
+
+function rhythmDistance(a: FeatureVector, b: FeatureVector): number | null {
+  const parts: number[] = [];
+  if (isNumber(a.spectralFlux) && isNumber(b.spectralFlux)) {
+    parts.push(unitDistance(a.spectralFlux - b.spectralFlux, 0.08));
+  }
+  if (isNumber(a.zeroCrossingRate) && isNumber(b.zeroCrossingRate)) {
+    parts.push(unitDistance(a.zeroCrossingRate - b.zeroCrossingRate, 0.04));
+  }
+  if (
+    isNumber(a.beatHistBpms?.[0]) &&
+    isNumber(b.beatHistBpms?.[0])
+  ) {
+    parts.push(
+      unitDistance(tempoDistance(a.beatHistBpms[0], b.beatHistBpms[0]), 16),
+    );
+  }
+  if (parts.length === 0) return null;
+  return parts.reduce((sum, value) => sum + value, 0) / parts.length;
+}
+
+function dynamicsExtDistance(a: FeatureVector, b: FeatureVector): number | null {
+  const parts: number[] = [];
+  if (isNumber(a.crestFactor) && isNumber(b.crestFactor)) {
+    parts.push(unitDistance(a.crestFactor - b.crestFactor, 8));
+  }
+  if (isNumber(a.dynamicComplexity) && isNumber(b.dynamicComplexity)) {
+    parts.push(unitDistance(a.dynamicComplexity - b.dynamicComplexity, 0.35));
+  }
+  if (isNumber(a.rmsStd) && isNumber(b.rmsStd)) {
+    parts.push(unitDistance(a.rmsStd - b.rmsStd, 0.08));
+  }
+  if (parts.length === 0) return null;
+  return parts.reduce((sum, value) => sum + value, 0) / parts.length;
+}
+
+/**
+ * Sonic distance in 0..1 using mastering-relevant axes.
+ * Loudness is intentionally light: the client is unmastered, so a
+ * commercial reference is supposed to be louder. Tonal balance carries
+ * the timbre budget when MFCC/spectral fields are missing.
+ */
+export function sonicDistance(
+  client: FeatureVector,
+  reference: FeatureVector,
+  weights: Weights,
+): number {
+  const axes: Array<{ distance: number; weight: number }> = [];
+  const timbre = timbreDistance(client, reference);
+  const toneWeight = weights.band + (timbre == null ? weights.timbre : 0);
+
+  pushAxis(
+    axes,
+    unitDistance(
+      client.integratedLoudnessLufs - reference.integratedLoudnessLufs,
+      8,
+    ),
+    weights.loudness,
+  );
+  pushAxis(
+    axes,
+    unitDistance(client.loudnessRangeDb - reference.loudnessRangeDb, 6),
+    weights.dynamicRange,
+  );
+  pushAxis(
+    axes,
+    isNumber(client.plrDb) && isNumber(reference.plrDb)
+      ? unitDistance(client.plrDb - reference.plrDb, 6)
+      : null,
+    weights.plr,
+  );
+  pushAxis(
+    axes,
+    unitDistance(tempoDistance(client.tempoBpm, reference.tempoBpm), 16),
+    weights.tempo,
+  );
+  pushAxis(
+    axes,
+    isNumber(client.onsetRate) && isNumber(reference.onsetRate)
+      ? unitDistance(client.onsetRate - reference.onsetRate, 1.5)
+      : null,
+    weights.onsets,
+  );
+  pushAxis(
+    axes,
+    unitDistance(client.stereoWidth - reference.stereoWidth, 0.35),
+    weights.stereoWidth,
+  );
+  pushAxis(
+    axes,
+    bandDistance(
+      client.frequencyBandEnergies,
+      reference.frequencyBandEnergies,
+    ),
+    toneWeight,
+  );
+  pushAxis(axes, timbre, weights.timbre);
+
+  const chroma = meanAbsOverlap(client.hpcp, reference.hpcp);
+  pushAxis(axes, chroma == null ? null : unitDistance(chroma, 0.25), weights.chroma);
+  pushAxis(axes, rhythmDistance(client, reference), weights.rhythm);
+  pushAxis(axes, dynamicsExtDistance(client, reference), weights.dynamicsExt);
+
+  let weighted = 0;
+  let weightSum = 0;
+  for (const axis of axes) {
+    weighted += axis.weight * axis.distance;
+    weightSum += axis.weight;
+  }
+  return weightSum === 0 ? 1 : weighted / weightSum;
+}
+
+function averageWindowSonic(
   query: StoredFingerprint,
   candidate: StoredFingerprint,
   weights: Weights,
-  metric: "cosine" | "euclidean",
-  poolStats: Array<{ mean: number; std: number }>,
-  dimWeights: number[],
 ): number {
   const qWindows = getFeatureWindows(query);
   const cWindows = getFeatureWindows(candidate);
   const n = Math.min(qWindows.length, cWindows.length);
-
-  const pairDistance = (qf: FeatureVector, cf: FeatureVector) => {
-    const qFlat = flattenFeatures(qf, weights);
-    const cFlat = flattenFeatures(cf, weights);
-    const qz = zscoreRow(qFlat.values, poolStats);
-    const cz = zscoreRow(cFlat.values, poolStats);
-    // Tempo uses octave-aware distance as an explicit symmetric weighted term
-    // (left out of the vector metric — slot injection was asymmetric for cosine).
-    const tempoIdx = 3;
-    const tempoTerm =
-      (dimWeights[tempoIdx] ?? 0) *
-      (tempoDistance(qf.tempoBpm, cf.tempoBpm) /
-        Math.max(poolStats[tempoIdx]?.std ?? 1, 1));
-    const qRest = qz.filter((_, i) => i !== tempoIdx);
-    const cRest = cz.filter((_, i) => i !== tempoIdx);
-    const wRest = dimWeights.filter((_, i) => i !== tempoIdx);
-
-    const base =
-      metric === "cosine"
-        ? weightedCosineDistance(qRest, cRest, wRest)
-        : weightedEuclideanDistance(qRest, cRest, wRest);
-    return base + tempoTerm;
-  };
-
   if (n <= 0) {
-    return pairDistance(
+    return sonicDistance(
       getAggregateFeatures(query),
       getAggregateFeatures(candidate),
+      weights,
     );
   }
-
   let sum = 0;
   for (let i = 0; i < n; i++) {
-    sum += pairDistance(qWindows[i], cWindows[i]);
+    sum += sonicDistance(qWindows[i], cWindows[i], weights);
   }
   return sum / n;
 }
 
+/** Published score: lower is a closer reference. Genre cannot be cancelled by tone. */
+export function referenceFitScore(
+  sonic: number,
+  genreCloseness: number,
+): number {
+  return (
+    (1 - GENRE_FIT_WEIGHT) * clamp01(sonic) +
+    GENRE_FIT_WEIGHT * clamp01(genreCloseness)
+  );
+}
+
+export function passesReferenceFit(
+  sonic: number,
+  genreCloseness: number,
+): boolean {
+  return (
+    clamp01(sonic) <= MAX_SONIC_DISTANCE &&
+    clamp01(genreCloseness) <= MAX_GENRE_CLOSENESS
+  );
+}
+
+export interface RankedReference<T> extends RankedMatch<T> {
+  sonicDistance: number;
+  genreCloseness: number;
+}
+
 /**
- * Rank candidates by sonic similarity.
- * - `balanced` (default): pool z-score + weighted cosine
- * - `tone` / `loudness`: weighted Euclidean on the same scaled dims (A/B presets)
+ * Rank commercial references.
+ * Presets change which sonic axes matter. Genre closeness is applied
+ * after that, including for "Match tone", so a tone twin in a looser
+ * genre still sorts behind a nearer style.
+ * This does not drop weak hits — the search applies passesReferenceFit
+ * so a loudness preset can reorder an already-accepted shortlist
+ * without emptying it.
  */
-export function rankBySonicSimilarity<T>(
+export function rankReferences<T>(
   query: StoredFingerprint,
-  candidates: Array<{ item: T; features: StoredFingerprint }>,
+  candidates: Array<{
+    item: T;
+    features: StoredFingerprint;
+    genreCloseness: number;
+  }>,
   preset: WeightPreset = "balanced",
   multipliers?: WeightMultipliers,
-): RankedMatch<T>[] {
+): RankedReference<T>[] {
   if (candidates.length === 0) return [];
-
   const weights = applyMultipliers(WEIGHT_PRESETS[preset], multipliers);
-  const metric: "cosine" | "euclidean" =
-    preset === "balanced" ? "cosine" : "euclidean";
-
-  // Build pool stats from aggregates (stable across window counts).
-  const allAggregates = [
-    getAggregateFeatures(query),
-    ...candidates.map((c) => getAggregateFeatures(c.features)),
-  ];
-  const flatAll = allAggregates.map((f) => flattenFeatures(f, weights));
-  const dim = flatAll[0].values.length;
-  const dimWeights = flatAll[0].weights;
-  const poolStats: Array<{ mean: number; std: number }> = [];
-  for (let i = 0; i < dim; i++) {
-    poolStats.push(poolMeanStd(flatAll.map((row) => row.values[i])));
-  }
-
-  const queryEmbed = getEmbedding(query);
 
   return candidates
-    .map(({ item, features }) => {
-      let distance = fingerprintDistance(
-        query,
-        features,
-        weights,
-        metric,
-        poolStats,
-        dimWeights,
-      );
-
-      const candEmbed = getEmbedding(features);
-      if (queryEmbed && candEmbed) {
-        const embedDist = embeddingCosineDistance(queryEmbed, candEmbed);
-        distance = SONIC_ALPHA * distance + EMBED_BETA * embedDist;
-      }
-
+    .map(({ item, features, genreCloseness }) => {
+      const sonic = averageWindowSonic(query, features, weights);
       return {
         item,
         features: getAggregateFeatures(features),
         fingerprint: features,
-        distance,
+        sonicDistance: sonic,
+        genreCloseness,
+        distance: referenceFitScore(sonic, genreCloseness),
       };
     })
     .sort((a, b) => a.distance - b.distance);
+}
+
+interface DisplayMatch {
+  featureVector: FeatureVector;
+  genre: string;
+  genreCloseness?: number;
+  distanceScore: number;
+}
+
+/**
+ * Fresh searches already arrive in balanced order, including learned weights.
+ * Tone and loudness presets reorder that shortlist without a new search.
+ * Genre closeness stays in the score so "Match tone" cannot bury a nearer style.
+ */
+export function orderDisplayedMatches<T extends DisplayMatch>(
+  client: StoredFingerprint,
+  matches: T[],
+  preset: WeightPreset,
+): T[] {
+  if (preset === "balanced" || matches.length === 0) return matches;
+  const canInfer = matches.some(
+    (match) => typeof match.genreCloseness !== "number",
+  );
+  const preferred = canInfer
+    ? inferPreferredGenre(matches.map((match) => match.genre))
+    : null;
+
+  // Preset toggles only have the reference aggregate on the client,
+  // so compare that to the client's aggregate instead of its first window.
+  return rankReferences(
+    getAggregateFeatures(client),
+    matches.map((match) => ({
+      item: match,
+      features: match.featureVector,
+      genreCloseness:
+        typeof match.genreCloseness === "number"
+          ? match.genreCloseness
+          : preferred
+            ? genreLabelAffinity(preferred, match.genre, null)
+            : 0,
+    })),
+    preset,
+  ).map((hit) => ({
+    ...hit.item,
+    distanceScore: hit.distance,
+  }));
 }
 
 /** Per-dimension deltas for the match card readout (reference − client). */

@@ -33,7 +33,7 @@ import {
 import { getAggregateFeatures } from "@/lib/feature-vector";
 import { groupAbsDeltas } from "@/lib/feedback-deltas";
 import {
-  rankBySonicSimilarity,
+  orderDisplayedMatches,
   type WeightPreset,
 } from "@/lib/matching";
 import { fadeInUp } from "@/lib/motion";
@@ -95,15 +95,11 @@ export function UploadCard() {
   // no extra API round trip.
   const displayedMatches = useMemo(() => {
     if (phase.step !== "done") return [];
-    if (weightPreset === "balanced") return phase.matches;
-    return rankBySonicSimilarity(
+    return orderDisplayedMatches(
       phase.featureVector,
-      phase.matches.map((m) => ({ item: m, features: m.featureVector })),
+      phase.matches,
       weightPreset,
-    ).map((hit) => ({
-      ...hit.item,
-      distanceScore: hit.distance,
-    }));
+    );
   }, [phase, weightPreset]);
 
   const safeActiveIndex =

@@ -24,6 +24,11 @@ export interface MatchResult {
   /** Seconds into the iTunes preview to start A/B (loudest window). */
   previewStartSec?: number | null;
   distanceScore: number;
+  /**
+   * 0 = requested style. Present on fresh searches so preset re-ranks
+   * cannot promote a tone match from a broader genre.
+   */
+  genreCloseness?: number;
   explanation: string;
   featureVector: FeatureVector;
   /** True when this ref is on the session's project shortlist. */
