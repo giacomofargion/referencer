@@ -4,7 +4,11 @@ import { NextResponse } from "next/server";
 import { analyzePreviewUrl } from "@/lib/analyze-server";
 import { debitForMatch, refundMatch } from "@/lib/credits";
 import { sql } from "@/lib/db";
-import { searchDeezerTracks, type PlatformTrack } from "@/lib/deezer";
+import {
+  searchDeezerGenreChart,
+  searchDeezerTracks,
+  type PlatformTrack,
+} from "@/lib/deezer";
 import { explainMatch } from "@/lib/explanations";
 import {
   getAggregateFeatures,
@@ -13,6 +17,7 @@ import {
 import {
   closerQueryKind,
   combineGenreCloseness,
+  deezerGenreId,
   genreLabelAffinity,
   instrumentsFromDiscogsLabel,
   isInGenreNeighborhood,
@@ -361,17 +366,28 @@ async function collectPlatformCandidates(
   };
 
   for (const { query, kind } of queries) {
-    const deezer = await searchDeezerTracks(query, RESULTS_PER_QUERY).catch(
-      (error) => {
-        console.warn("Deezer search failed:", error);
-        return [] as PlatformTrack[];
-      },
-    );
+    // "Rock" as a text query matches song titles (Rock & Roll Band, …).
+    // Parent and related genres come from the Deezer chart instead.
+    const chartGenre = isMatchGenre(query) ? query : genre;
+    const deezer =
+      kind === "genre" || kind === "related"
+        ? await searchDeezerGenreChart(
+            deezerGenreId(chartGenre),
+            RESULTS_PER_QUERY,
+          ).catch((error) => {
+            console.warn("Deezer genre chart failed:", error);
+            return [] as PlatformTrack[];
+          })
+        : await searchDeezerTracks(query, RESULTS_PER_QUERY).catch((error) => {
+            console.warn("Deezer search failed:", error);
+            return [] as PlatformTrack[];
+          });
     for (const track of deezer) {
-      // Deezer stamps the requested genre as a placeholder — treat as unknown
-      // and let hydratePlatformTracks gate on the real iTunes genre.
+      // Deezer search hits have no genre — hydrate gates on the iTunes genre.
       consider({ ...track, queryKind: kind });
     }
+
+    if (kind === "genre" || kind === "related") continue;
 
     const itunes = await searchItunesSongs(query, RESULTS_PER_QUERY).catch(
       (error) => {

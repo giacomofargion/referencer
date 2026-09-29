@@ -4,6 +4,7 @@ import { MAX_GENRE_CLOSENESS } from "@/lib/matching";
 import {
   closerQueryKind,
   combineGenreCloseness,
+  deezerGenreId,
   genreLabelAffinity,
   searchQueriesForDiscovery,
 } from "@/lib/genres";
@@ -41,6 +42,11 @@ describe("genre closeness", () => {
     // A genuinely similar genre can still clear the bar when the tone does.
     assert.ok(relatedHit <= MAX_GENRE_CLOSENESS);
     assert.equal(closerQueryKind("genre", "style"), "style");
+  });
+
+  it("maps a parent genre to a Deezer chart instead of a title search", () => {
+    assert.equal(deezerGenreId("Rock"), 152);
+    assert.equal(deezerGenreId("Electronic"), 113);
   });
 
   it("does not treat a far genre label as close", () => {

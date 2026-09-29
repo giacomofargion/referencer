@@ -200,7 +200,9 @@ async function classify(mono, sampleRate) {
   const EssentiaWASM = await essentiaWasmReady;
   const [model, labels] = await Promise.all([loadModel(), loadLabels()]);
 
-  const audio = centerSlice(await downsampleTo16k(mono, sampleRate), TARGET_SR);
+  // Slice before resampling. Downsampling a full mix first can blow the
+  // 60s genre timeout before classification even starts.
+  const audio = await downsampleTo16k(centerSlice(mono, sampleRate), sampleRate);
   const extractor = new EssentiaModel.EssentiaTFInputExtractor(
     EssentiaWASM,
     "musicnn",

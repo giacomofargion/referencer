@@ -126,6 +126,40 @@ export function isMatchGenre(value: string): value is MatchGenre {
   return (MATCH_GENRES as readonly string[]).includes(value);
 }
 
+/**
+ * Deezer chart ids. Parent-genre words like "Rock" are song titles as often
+ * as they are styles, so a text search returns "Rock & Roll" instead of rock.
+ * Charts are actual tracks in that genre.
+ */
+export function deezerGenreId(genre: MatchGenre): number {
+  switch (genre) {
+    case "Electronic":
+      return 113;
+    case "Rock":
+      return 152;
+    case "Pop":
+      return 132;
+    case "Hip-Hop":
+      return 116;
+    case "R&B":
+      return 165;
+    case "Jazz":
+      return 129;
+    case "Folk":
+      return 466;
+    case "Country":
+      return 84;
+    case "Blues":
+      return 153;
+    case "Classical":
+      return 98;
+    default: {
+      const exhaustive: never = genre;
+      return exhaustive;
+    }
+  }
+}
+
 /** Discogs style segment, or null when the label is parent-only. */
 export function discogsStyle(label: string | null | undefined): string | null {
   const raw = label?.trim();

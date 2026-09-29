@@ -89,3 +89,29 @@ export async function searchDeezerTracks(
     .map((hit) => normalizeHit(hit))
     .filter((t): t is PlatformTrack => t !== null);
 }
+
+/** Top tracks in a Deezer genre chart, not a free-text title search. */
+export async function searchDeezerGenreChart(
+  genreId: number,
+  limit = 12,
+): Promise<PlatformTrack[]> {
+  const params = new URLSearchParams({
+    limit: String(Math.max(1, Math.min(limit, 40))),
+  });
+  const response = await fetchDeezer(
+    `https://api.deezer.com/chart/${genreId}/tracks?${params}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Deezer genre chart failed (${response.status})`);
+  }
+  const data = (await response.json()) as {
+    data?: DeezerSearchHit[];
+    error?: { message?: string };
+  };
+  if (data.error?.message) {
+    throw new Error(`Deezer genre chart error: ${data.error.message}`);
+  }
+  return (data.data ?? [])
+    .map((hit) => normalizeHit(hit))
+    .filter((t): t is PlatformTrack => t !== null);
+}
