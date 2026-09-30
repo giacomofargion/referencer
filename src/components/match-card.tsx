@@ -39,6 +39,7 @@ interface MatchCardProps {
   match: MatchResult;
   clientFeatures: FeatureVector;
   saveControl?: ReactNode;
+  rejectControl?: ReactNode;
 }
 
 function formatSigned(value: number, digits = 1, suffix = ""): string {
@@ -51,6 +52,7 @@ export function MatchCard({
   match,
   clientFeatures,
   saveControl,
+  rejectControl,
 }: MatchCardProps) {
   const deltas = computeFeatureDeltas(clientFeatures, match.featureVector);
 
@@ -63,8 +65,11 @@ export function MatchCard({
     >
       <Card className="border-border bg-surface-0/40 sm:bg-surface-1">
         <CardContent className="flex flex-col gap-3 sm:gap-4">
-          {saveControl && (
-            <div className="flex justify-end">{saveControl}</div>
+          {(saveControl || rejectControl) && (
+            <div className="flex justify-end gap-2">
+              {rejectControl}
+              {saveControl}
+            </div>
           )}
           <p className="text-sm text-text-secondary">{match.explanation}</p>
 

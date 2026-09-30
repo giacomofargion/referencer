@@ -5,10 +5,12 @@ import { analyzePreviewUrl } from "@/lib/analyze-server";
 import { debitForMatch, refundMatch } from "@/lib/credits";
 import { sql } from "@/lib/db";
 import {
-  searchDeezerGenreChart,
-  searchDeezerTracks,
-  type PlatformTrack,
-} from "@/lib/deezer";
+  cacheRowNeedsReanalyze,
+  collectPlatformCandidates,
+  loadCacheStatusByTrackIds,
+  upsertReference,
+  type DiscoveredTrack,
+} from "@/lib/discovery";
 import { explainMatch } from "@/lib/explanations";
 import {
   getAggregateFeatures,
@@ -17,9 +19,9 @@ import {
 import {
   closerQueryKind,
   combineGenreCloseness,
-  deezerGenreId,
   genreLabelAffinity,
   instrumentsFromDiscogsLabel,
+  isDrumAndBassTempo,
   isInGenreNeighborhood,
   isMatchGenre,
   searchQueriesForDiscovery,
@@ -30,14 +32,10 @@ import {
   isEphemeralPreviewUrl,
   lookupItunesTracks,
   searchItunesSongs,
-  type ItunesTrack,
 } from "@/lib/itunes";
 import { pickStrictItunesMatch } from "@/lib/itunes-match";
 import { getLearnedWeightMultipliers } from "@/lib/learned-weights";
-import {
-  passesReferenceFit,
-  rankReferences,
-} from "@/lib/matching";
+import { isStrongReferenceFit, rankReferences } from "@/lib/matching";
 import { refreshEphemeralPreviewUrls } from "@/lib/refresh-previews";
 import type { StoredFingerprint } from "@/lib/types";
 
@@ -45,6 +43,13 @@ export const maxDuration = 60;
 
 /** Cap new Essentia analyses per request so we stay under maxDuration. */
 const MAX_HYDRATIONS = 14;
+/**
+ * Cap throttled iTunes text-search calls (resolving a Deezer-only hit to a
+ * stable id) per request. iTunes's ~20 req/min limit means each one costs
+ * a serialized 3.5s — uncapped, this alone can burn the whole time budget
+ * resolving broad chart filler before a single preview gets analyzed.
+ */
+const MAX_RESOLVE_CALLS = 8;
 /** Rank against at most this many analyzed refs. */
 const MAX_POOL = 60;
 const TOP_RESULTS = 8;
@@ -157,6 +162,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Upload not found" }, { status: 404 });
   }
 
+  await sql`
+    UPDATE client_uploads SET genre = ${genre}
+    WHERE id = ${uploadId} AND clerk_user_id = ${userId}
+  `;
+
   const upload = uploads[0];
   const projectId = (upload.project_id as string | null) ?? null;
   const clientFingerprint = upload.feature_vector as StoredFingerprint | null;
@@ -190,11 +200,27 @@ export async function POST(request: Request) {
       discogsLabel,
       instruments,
     }).slice(0, QUERIES_PER_SOURCE);
+    // 86 BPM is the half-time reading of a 172 BPM drum-and-bass grid.
+    if (genre === "Electronic" && isDrumAndBassTempo(clientFeatures.tempoBpm)) {
+      queries.unshift({ query: "drum and bass", kind: "style" });
+    }
+
+    // The analyzed library answers immediately. Live search is slow and a
+    // style word like "Glitch" is mostly song titles, so the chart and the
+    // library are what actually fill a shortlist.
+    const catalogPromise = loadGenreCatalog(genre, discogsLabel).catch(
+      (error) => {
+        console.warn("Genre catalog lookup failed:", error);
+        return [] as PooledReference[];
+      },
+    );
 
     const platformHits = await collectPlatformCandidates(
       queries,
       genre,
       discogsLabel,
+      RESULTS_PER_QUERY,
+      MAX_POOL,
     );
     const hydrated = await hydratePlatformTracks(
       platformHits,
@@ -229,6 +255,9 @@ export async function POST(request: Request) {
       return [{ ...row, genreCloseness: closeness }];
     });
 
+    const catalog = await catalogPromise;
+    pool = mergePools(pool, catalog);
+
     const styleNote = discogsLabel?.includes("---")
       ? discogsLabel.split("---", 2)[1]?.trim()
       : null;
@@ -252,14 +281,15 @@ export async function POST(request: Request) {
     return NextResponse.json({
       matches: [],
       clientFeatures,
+      projectId,
       creditsRemaining: balanceAfterDebit,
       discoveryNote:
         "No playable references found for this genre — try again in a moment.",
     });
   }
 
-  const weightMultipliers = await getLearnedWeightMultipliers();
-  const ranked = rankReferences(
+  const weightMultipliers = await getLearnedWeightMultipliers(genre);
+  const rankedAll = rankReferences(
     clientFingerprint,
     pool.map((row) => ({
       item: row,
@@ -268,23 +298,16 @@ export async function POST(request: Request) {
     })),
     "balanced",
     weightMultipliers,
-  )
-    .filter((hit) =>
-      passesReferenceFit(hit.sonicDistance, hit.genreCloseness),
-    )
-    .slice(0, TOP_RESULTS);
-
-  if (ranked.length === 0) {
-    await sql`DELETE FROM matches WHERE client_upload_id = ${uploadId}`;
-    return NextResponse.json({
-      matches: [],
-      clientFeatures,
-      projectId,
-      discoveryNote:
-        "Nothing in this search was close enough in style and tone to use as a reference.",
-      creditsRemaining: balanceAfterDebit,
-    });
-  }
+  );
+  // `pool` is already gated to the requested genre neighborhood (live hits
+  // and the catalog were both filtered there). Never reach outside it for a
+  // cross-genre "tone twin," and never empty the list because nothing
+  // cleared a sonic-distance cutoff — show the closest tracks this search
+  // actually found in style, ranked, and say honestly how close they are.
+  const ranked = rankedAll.slice(0, TOP_RESULTS);
+  const strongFitCount = ranked.filter((hit) =>
+    isStrongReferenceFit(hit.sonicDistance, hit.genreCloseness),
+  ).length;
 
   await sql`DELETE FROM matches WHERE client_upload_id = ${uploadId}`;
 
@@ -334,94 +357,80 @@ export async function POST(request: Request) {
   // Final pass: replace any remaining Deezer CDN URLs before the client plays them.
   await refreshEphemeralPreviewUrls(matches);
 
+  const discoveryNote =
+    strongFitCount > 0
+      ? `${sourceNote} → closest ${matches.length} of ${pool.length} in style, ${strongFitCount} with a strong tone match.`
+      : `${sourceNote} → closest ${matches.length} of ${pool.length} in style. Tone is a stretch on all of them — none are a strong match yet.`;
+
   return NextResponse.json({
     matches,
     clientFeatures,
     projectId,
-    discoveryNote: `${sourceNote} → Deezer/iTunes. Kept ${matches.length} of ${pool.length} that cleared style and tone.`,
+    discoveryNote,
     creditsRemaining: balanceAfterDebit,
   });
 }
 
-interface DiscoveredTrack extends PlatformTrack {
-  queryKind: DiscoveryQueryKind;
-}
 
-async function collectPlatformCandidates(
-  queries: Array<{ query: string; kind: DiscoveryQueryKind }>,
-  genre: MatchGenre,
-  discogsLabel: string | null,
-): Promise<DiscoveredTrack[]> {
-  const byKey = new Map<string, DiscoveredTrack>();
-
-  const consider = (track: DiscoveredTrack) => {
-    const key = `${track.artist.toLowerCase()}|${track.title.toLowerCase()}`;
-    const previous = byKey.get(key);
-    if (!previous) {
-      byKey.set(key, track);
-      return;
-    }
-    // Keep the hit, but remember the closest query that found it.
-    previous.queryKind = closerQueryKind(previous.queryKind, track.queryKind);
-  };
-
-  for (const { query, kind } of queries) {
-    // "Rock" as a text query matches song titles (Rock & Roll Band, …).
-    // Parent and related genres come from the Deezer chart instead.
-    const chartGenre = isMatchGenre(query) ? query : genre;
-    const deezer =
-      kind === "genre" || kind === "related"
-        ? await searchDeezerGenreChart(
-            deezerGenreId(chartGenre),
-            RESULTS_PER_QUERY,
-          ).catch((error) => {
-            console.warn("Deezer genre chart failed:", error);
-            return [] as PlatformTrack[];
-          })
-        : await searchDeezerTracks(query, RESULTS_PER_QUERY).catch((error) => {
-            console.warn("Deezer search failed:", error);
-            return [] as PlatformTrack[];
-          });
-    for (const track of deezer) {
-      // Deezer search hits have no genre — hydrate gates on the iTunes genre.
-      consider({ ...track, queryKind: kind });
-    }
-
-    if (kind === "genre" || kind === "related") continue;
-
-    const itunes = await searchItunesSongs(query, RESULTS_PER_QUERY).catch(
-      (error) => {
-        console.warn("iTunes search failed:", error);
-        return [] as ItunesTrack[];
-      },
-    );
-    for (const track of itunes) {
-      const platformGenre = track.genre || genre;
-      if (!isInGenreNeighborhood(genre, platformGenre, discogsLabel)) {
-        continue;
-      }
-      consider({
-        cacheKey: `itunes:${track.itunesTrackId}`,
-        deezerId: null,
-        itunesTrackId: track.itunesTrackId,
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        artworkUrl: track.artworkUrl,
-        genre: platformGenre,
-        previewUrl: track.previewUrl,
-        queryKind: kind,
-      });
+/** Keep the closer genre score when live search and the library both have a track. */
+function mergePools(
+  live: PooledReference[],
+  catalog: PooledReference[],
+): PooledReference[] {
+  const byTrack = new Map<number, PooledReference>();
+  for (const row of catalog) byTrack.set(row.itunes_track_id, row);
+  for (const row of live) {
+    const previous = byTrack.get(row.itunes_track_id);
+    if (!previous || row.genreCloseness < previous.genreCloseness) {
+      byTrack.set(row.itunes_track_id, row);
     }
   }
+  return [...byTrack.values()];
+}
 
-  return [...byKey.values()].slice(0, MAX_POOL);
+/**
+ * Already-analyzed tracks in this genre — answers instantly while live
+ * discovery (slower, and thin for any style that hasn't been searched
+ * before) fills in behind it. See scripts/seed-shelf.ts to grow this on
+ * purpose instead of waiting for it to accumulate from past searches.
+ */
+async function loadGenreCatalog(
+  genre: MatchGenre,
+  discogsLabel: string | null,
+): Promise<PooledReference[]> {
+  const rows = await sql`
+    SELECT itunes_track_id, genre
+    FROM reference_tracks
+    WHERE feature_vector IS NOT NULL
+    ORDER BY analyzed_at DESC
+  `;
+  const ids: number[] = [];
+  for (const row of rows) {
+    if (!isInGenreNeighborhood(genre, String(row.genre ?? ""), discogsLabel)) {
+      continue;
+    }
+    ids.push(Number(row.itunes_track_id));
+    if (ids.length >= 160) break;
+  }
+  const loaded = await loadReferencesByTrackIds(new Set(ids));
+  return loaded.map((row) => ({
+    ...row,
+    genreCloseness: combineGenreCloseness(
+      "genre",
+      genreLabelAffinity(genre, row.genre, discogsLabel),
+    ),
+  }));
 }
 
 /**
  * Resolve to iTunes ids for the existing reference_tracks cache key, analyze
  * previews (Deezer or iTunes URL), upsert features.
  * Stops early when the request deadline is reached so ranking still has budget.
+ *
+ * `hits` already arrives style-first (see genres.ts hydrationOrder): specific
+ * style hits are queued and analyzed before broad parent-genre chart filler,
+ * and iTunes-native hits (already carry a stable id) are cheaper than
+ * Deezer-only hits that need a throttled resolve-by-search call.
  */
 async function hydratePlatformTracks(
   hits: DiscoveredTrack[],
@@ -433,14 +442,42 @@ async function hydratePlatformTracks(
     [];
   const seen = new Set<number>();
   let analyzed = 0;
+  let resolveCalls = 0;
   const deadlineAt =
     requestStartedAt + maxDuration * 1000 - HYDRATE_SAFETY_MARGIN_MS;
 
   const pastDeadline = () => Date.now() >= deadlineAt;
+  const pendingAnalysis: Array<{
+    itunesId: number;
+    previewUrl: string;
+    title: string;
+    artist: string;
+    album: string | null;
+    artworkUrl: string | null;
+    genre: string;
+    itunesGenre: string;
+    queryKind: DiscoveryQueryKind;
+  }> = [];
+
+  // Hits that already carry an iTunes id (iTunes-native search hits) need no
+  // throttled resolve call — batch their cache status up front so the loop
+  // below only ever talks to the DB per-item for the much smaller set that
+  // still needs resolving.
+  const knownIds = new Set(
+    hits
+      .map((hit) => hit.itunesTrackId)
+      .filter((id): id is number => id != null),
+  );
+  const cacheByTrackId = await loadCacheStatusByTrackIds(knownIds);
 
   for (const hit of hits) {
     if (pastDeadline()) break;
-    if (analyzed >= MAX_HYDRATIONS && ordered.length >= TOP_RESULTS) break;
+    // Stop once enough fresh candidates are queued to fill the analysis
+    // budget and we already have a full result list — more resolving or
+    // cache lookups past that point cannot change the outcome.
+    if (pendingAnalysis.length >= MAX_HYDRATIONS && ordered.length >= TOP_RESULTS) {
+      break;
+    }
 
     let itunesId = hit.itunesTrackId;
     let previewUrl = hit.previewUrl;
@@ -450,11 +487,19 @@ async function hydratePlatformTracks(
     let artworkUrl = hit.artworkUrl;
     let genre = hit.genre || fallbackGenre;
     let itunesGenre = hit.genre || fallbackGenre;
+    // Was this id already covered by the up-front batch lookup? Tracked
+    // separately so a freshly-resolved id (not in that batch) gets its own
+    // lookup below, without re-querying an id the batch already checked.
+    const wasKnownId = itunesId != null;
+    let cached = itunesId != null ? cacheByTrackId.get(itunesId) : undefined;
 
     if (itunesId == null) {
-      if (pastDeadline()) break;
+      // Bounded separately from MAX_HYDRATIONS: each call is a serialized
+      // ~3.5s iTunes request, so this is what actually caps request time.
+      if (pastDeadline() || resolveCalls >= MAX_RESOLVE_CALLS) continue;
       const term = [hit.artist, hit.title].filter(Boolean).join(" ").trim();
       if (!term) continue;
+      resolveCalls += 1;
       const itunesHits = await searchItunesSongs(term, 8).catch(() => []);
       const matched = pickStrictItunesMatch(
         { title: hit.title, artist: hit.artist },
@@ -490,66 +535,47 @@ async function hydratePlatformTracks(
 
     if (pastDeadline()) break;
 
-    const existing = await sql`
-      SELECT id, preview_start_sec, preview_url, feature_vector FROM reference_tracks
-      WHERE itunes_track_id = ${itunesId} AND feature_vector IS NOT NULL
-      LIMIT 1
-    `;
+    // A resolve call surfaces an id the up-front batch never saw — look it
+    // up now. (A pre-known id's status is already authoritative from that
+    // batch, cached or not, so this only runs for freshly-resolved ids.)
+    if (!wasKnownId) {
+      cached = (await loadCacheStatusByTrackIds(new Set([itunesId]))).get(
+        itunesId,
+      );
+    }
 
-    const cached = existing[0];
-    const needsReanalyze =
-      !cached ||
-      cached.preview_start_sec == null ||
-      !isStoredFingerprint(cached.feature_vector) ||
-      (typeof cached.feature_vector === "object" &&
-        cached.feature_vector !== null &&
-        (cached.feature_vector as { version?: number }).version !== 2);
+    if (cacheRowNeedsReanalyze(cached)) {
+      // Analyze after the lookup pass so one new preview cannot block
+      // cached tracks that are already usable references.
+      if (pendingAnalysis.length >= MAX_HYDRATIONS) continue;
+      pendingAnalysis.push({
+        itunesId,
+        previewUrl,
+        title,
+        artist,
+        album,
+        artworkUrl,
+        genre,
+        itunesGenre,
+        queryKind: hit.queryKind,
+      });
+      seen.add(itunesId);
+      continue;
+    }
 
-    if (needsReanalyze) {
-      if (analyzed >= MAX_HYDRATIONS) continue;
-      if (pastDeadline()) break;
-      try {
-        // Prefer a stable URL for analysis when the hit only has Deezer.
-        let analyzeUrl = previewUrl;
-        if (isEphemeralPreviewUrl(analyzeUrl)) {
-          const fresh = await lookupItunesTracks([itunesId]);
-          const itunesPreview = fresh.get(itunesId)?.previewUrl;
-          if (itunesPreview) analyzeUrl = itunesPreview;
-        }
-        const { fingerprint, loudestStartSec } =
-          await analyzePreviewUrl(analyzeUrl);
-        await upsertReference(
-          {
-            itunesTrackId: itunesId,
-            title,
-            artist,
-            album,
-            artworkUrl,
-            genre,
-            itunesGenre,
-            previewUrl: analyzeUrl,
-          },
-          fingerprint,
-          loudestStartSec,
-        );
-        analyzed += 1;
-      } catch {
-        continue;
-      }
-    } else {
-      // Cache hit: swap ephemeral Deezer URLs for stable iTunes ones (no re-analyze).
-      const storedUrl = String(cached.preview_url ?? "");
-      if (isEphemeralPreviewUrl(storedUrl)) {
-        const stable =
-          (!isEphemeralPreviewUrl(previewUrl) ? previewUrl : null) ||
-          (await lookupItunesTracks([itunesId])).get(itunesId)?.previewUrl;
-        if (stable && stable !== storedUrl) {
-          await sql`
-            UPDATE reference_tracks
-            SET preview_url = ${stable}
-            WHERE itunes_track_id = ${itunesId}
-          `;
-        }
+    // Cache hit: swap ephemeral Deezer URLs for stable iTunes ones (no re-analyze).
+    if (!cached) continue;
+    const storedUrl = cached.previewUrl;
+    if (isEphemeralPreviewUrl(storedUrl)) {
+      const stable =
+        (!isEphemeralPreviewUrl(previewUrl) ? previewUrl : null) ||
+        (await lookupItunesTracks([itunesId])).get(itunesId)?.previewUrl;
+      if (stable && stable !== storedUrl) {
+        await sql`
+          UPDATE reference_tracks
+          SET preview_url = ${stable}
+          WHERE itunes_track_id = ${itunesId}
+        `;
       }
     }
 
@@ -557,45 +583,41 @@ async function hydratePlatformTracks(
     ordered.push({ itunesTrackId: itunesId, queryKind: hit.queryKind });
   }
 
-  return ordered;
-}
+  for (const pending of pendingAnalysis) {
+    if (pastDeadline() || analyzed >= MAX_HYDRATIONS) break;
+    try {
+      let analyzeUrl = pending.previewUrl;
+      if (isEphemeralPreviewUrl(analyzeUrl)) {
+        const fresh = await lookupItunesTracks([pending.itunesId]);
+        const itunesPreview = fresh.get(pending.itunesId)?.previewUrl;
+        if (itunesPreview) analyzeUrl = itunesPreview;
+      }
+      const { fingerprint, loudestStartSec } = await analyzePreviewUrl(analyzeUrl);
+      await upsertReference(
+        {
+          itunesTrackId: pending.itunesId,
+          title: pending.title,
+          artist: pending.artist,
+          album: pending.album,
+          artworkUrl: pending.artworkUrl,
+          genre: pending.genre,
+          itunesGenre: pending.itunesGenre,
+          previewUrl: analyzeUrl,
+        },
+        fingerprint,
+        loudestStartSec,
+      );
+      analyzed += 1;
+      ordered.push({
+        itunesTrackId: pending.itunesId,
+        queryKind: pending.queryKind,
+      });
+    } catch {
+      continue;
+    }
+  }
 
-async function upsertReference(
-  track: {
-    itunesTrackId: number;
-    title: string;
-    artist: string;
-    album: string | null;
-    artworkUrl: string | null;
-    genre: string;
-    itunesGenre: string;
-    previewUrl: string;
-  },
-  fingerprint: StoredFingerprint,
-  loudestStartSec: number,
-): Promise<void> {
-  await sql`
-    INSERT INTO reference_tracks (
-      itunes_track_id, title, artist, album, artwork_url,
-      genre, itunes_genre, preview_url, feature_vector, analyzed_at,
-      preview_start_sec
-    )
-    VALUES (
-      ${track.itunesTrackId}, ${track.title}, ${track.artist},
-      ${track.album}, ${track.artworkUrl}, ${track.genre},
-      ${track.itunesGenre}, ${track.previewUrl},
-      ${JSON.stringify(fingerprint)}::jsonb, now(),
-      ${loudestStartSec}
-    )
-    ON CONFLICT (itunes_track_id) DO UPDATE SET
-      feature_vector = EXCLUDED.feature_vector,
-      analyzed_at = EXCLUDED.analyzed_at,
-      preview_url = EXCLUDED.preview_url,
-      itunes_genre = EXCLUDED.itunes_genre,
-      genre = EXCLUDED.genre,
-      artwork_url = COALESCE(EXCLUDED.artwork_url, reference_tracks.artwork_url),
-      preview_start_sec = EXCLUDED.preview_start_sec
-  `;
+  return ordered;
 }
 
 async function loadReferencesByTrackIds(

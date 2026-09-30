@@ -77,8 +77,18 @@ export interface FeatureFingerprint {
   version: 2;
   /** Mean across windows — primary vector for UI / legacy callers. */
   aggregate: FeatureVector;
-  /** Equal-duration sections (1–5). */
+  /** Equal-duration sections spanning the full track (1–5). For UI / whole-mix stats. */
   windows: FeatureVector[];
+  /**
+   * Equal-duration sections of a short, representative excerpt (≈30s,
+   * centered on the loudest part of the track) — comparable in length and
+   * structure to a commercial preview clip. Ranking compares this, not
+   * `windows`, so a five-section mix isn't judged on its intro against a
+   * reference's chorus. Absent on rows analyzed before this existed or on
+   * references (whose `windows` already cover just the preview, so they're
+   * already a fair comparison) — callers fall back to `windows`.
+   */
+  matchWindows?: FeatureVector[];
   /** L2-normalized Discogs penultimate embedding (browser only today). */
   embedding?: number[];
 }

@@ -10,7 +10,9 @@
     "lint": "eslint",
     "vendor:tfjs": "bash scripts/vendor-tfjs.sh",
     "models:discogs": "bash scripts/vendor-tfjs.sh && bash scripts/download-discogs-tfjs.sh",
-    "mert:worker": "cd workers/mert-embed && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8091"
+    "mert:worker": "cd workers/mert-embed && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8091",
+    "test": "tsx --test src/lib/*.test.ts",
+    "seed:shelf": "tsx scripts/seed-shelf.ts"
   },
   "dependencies": {
     "@audio/decode-aac": "^1.3.4",
@@ -38,6 +40,7 @@
     "tw-animate-css": "^1.4.0"
   },
   "devDependencies": {
+    "@next/env": "16.2.10",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

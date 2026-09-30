@@ -35,6 +35,16 @@ const TEMPO_SLICE_SECONDS = 60;
 const MIN_WINDOW_SECONDS = 8;
 const TARGET_WINDOW_SECONDS = 20;
 const MAX_WINDOWS = 5;
+/**
+ * Length of the excerpt used for ranking against references, matching a
+ * typical commercial preview (~30s). References don't need their own copy
+ * of this: their `windows` already cover just the preview, so matching.ts's
+ * getMatchWindows falls back to them directly — only the full-length client
+ * mix needs a separate short slice.
+ */
+const MATCH_SLICE_SECONDS = 30;
+/** Search window for the loudest-point scan below, capped like the server's default. */
+const LOUDEST_SEARCH_SECONDS = 20;
 const MFCC_COEFFS = 13;
 const HPCP_BINS = 12;
 const SPECTRAL_CONTRAST_BANDS = 6;
@@ -111,6 +121,62 @@ function centerSlice(mono, sampleRate, seconds) {
   const sliceLength = Math.min(mono.length, Math.floor(seconds * sampleRate));
   const start = Math.max(0, Math.floor((mono.length - sliceLength) / 2));
   return mono.subarray(start, start + sliceLength);
+}
+
+/** Downmix stereo buffers to mono. Mirrors src/lib/loudest-window.ts. */
+function mixToMono(left, right) {
+  const n = Math.min(left.length, right.length);
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    mono[i] = (left[i] + right[i]) * 0.5;
+  }
+  return mono;
+}
+
+/**
+ * Start (seconds) of the loudest contiguous window in a mono mix — RMS
+ * energy over 1s blocks, pick the max-energy contiguous span. Used to find
+ * the representative excerpt for match-slice ranking, the same way it's
+ * already used for A/B playback so intros don't dominate. Mirrors
+ * src/lib/loudest-window.ts findLoudestWindowStartSeconds.
+ */
+function findLoudestWindowStartSeconds(mono, sampleRate, windowSeconds) {
+  const windowLength = Math.floor(windowSeconds * sampleRate);
+  if (mono.length <= windowLength || sampleRate <= 0) return 0;
+
+  const blockLength = Math.max(1, Math.floor(sampleRate));
+  const blockCount = Math.floor(mono.length / blockLength);
+  if (blockCount <= 0) return 0;
+
+  const blockEnergies = new Array(blockCount);
+  for (let b = 0; b < blockCount; b++) {
+    let sum = 0;
+    const offset = b * blockLength;
+    for (let i = 0; i < blockLength; i++) {
+      const s = mono[offset + i];
+      sum += s * s;
+    }
+    blockEnergies[b] = sum;
+  }
+
+  const blocksPerWindow = Math.max(1, Math.floor(windowSeconds));
+  if (blocksPerWindow >= blockCount) return 0;
+
+  let windowSum = 0;
+  for (let b = 0; b < blocksPerWindow; b++) {
+    windowSum += blockEnergies[b];
+  }
+  let bestSum = windowSum;
+  let bestStart = 0;
+  for (let b = blocksPerWindow; b < blockCount; b++) {
+    windowSum += blockEnergies[b] - blockEnergies[b - blocksPerWindow];
+    if (windowSum > bestSum) {
+      bestSum = windowSum;
+      bestStart = b - blocksPerWindow + 1;
+    }
+  }
+
+  return bestStart * (blockLength / sampleRate);
 }
 
 function computeOnsetRate(essentia, mono, sampleRate) {
@@ -394,18 +460,111 @@ function computeFrameDescriptors(essentia, mono, sampleRate) {
   };
 }
 
+/**
+ * Essentia's K-weighting IIR is only trustworthy at 44.1 and 48 kHz.
+ * At 96 kHz the same full-scale tone comes back as the -70 LUFS silence
+ * gate, so higher rates are low-passed and measured at 48 kHz.
+ * Keep in sync with src/lib/extract-features.ts.
+ */
+const NATIVE_LOUDNESS_RATES = new Set([44100, 48000]);
+const LOUDNESS_TARGET_RATE = 48000;
+
+function lowpassBiquad(sampleRate, cutoff, q) {
+  const w0 = (2 * Math.PI * cutoff) / sampleRate;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cos = Math.cos(w0);
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 - cos) / 2 / a0,
+    b1: (1 - cos) / a0,
+    b2: (1 - cos) / 2 / a0,
+    a1: (-2 * cos) / a0,
+    a2: (1 - alpha) / a0,
+  };
+}
+
+function applyBiquad(input, coeffs) {
+  const out = new Float32Array(input.length);
+  let x1 = 0;
+  let x2 = 0;
+  let y1 = 0;
+  let y2 = 0;
+  for (let i = 0; i < input.length; i++) {
+    const x0 = input[i];
+    const y0 =
+      coeffs.b0 * x0 +
+      coeffs.b1 * x1 +
+      coeffs.b2 * x2 -
+      coeffs.a1 * y1 -
+      coeffs.a2 * y2;
+    out[i] = y0;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+  }
+  return out;
+}
+
+/** 4th-order lowpass, then linear resample onto 48 kHz for the EBU meter. */
+function resampleForLoudness(input, sampleRate) {
+  const cutoff = Math.min(
+    20000,
+    LOUDNESS_TARGET_RATE * 0.45,
+    sampleRate * 0.45,
+  );
+  // Butterworth Qs for two cascaded biquads (4th order).
+  let filtered = input;
+  for (const q of [0.5411961, 1.306563]) {
+    filtered = applyBiquad(filtered, lowpassBiquad(sampleRate, cutoff, q));
+  }
+  const ratio = sampleRate / LOUDNESS_TARGET_RATE;
+  const outLength = Math.max(1, Math.floor(input.length / ratio));
+  const out = new Float32Array(outLength);
+  const last = filtered.length - 1;
+  for (let i = 0; i < outLength; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos);
+    const frac = pos - i0;
+    const s0 = filtered[i0] ?? 0;
+    const s1 = filtered[Math.min(i0 + 1, last)] ?? 0;
+    out[i] = s0 * (1 - frac) + s1 * frac;
+  }
+  return out;
+}
+
+function measureEbuLoudness(essentia, left, right, sampleRate) {
+  const native = NATIVE_LOUDNESS_RATES.has(sampleRate);
+  const leftIn = native ? left : resampleForLoudness(left, sampleRate);
+  const rightIn = native ? right : resampleForLoudness(right, sampleRate);
+  const rate = native ? sampleRate : LOUDNESS_TARGET_RATE;
+  const leftVector = essentia.arrayToVector(leftIn);
+  const rightVector = essentia.arrayToVector(rightIn);
+  try {
+    const loudness = essentia.LoudnessEBUR128(
+      leftVector,
+      rightVector,
+      0.1,
+      rate,
+      false,
+    );
+    const integratedLoudness = loudness.integratedLoudness;
+    const loudnessRange = loudness.loudnessRange;
+    safeDelete(loudness.momentaryLoudness);
+    safeDelete(loudness.shortTermLoudness);
+    return { integratedLoudness, loudnessRange };
+  } finally {
+    leftVector.delete();
+    rightVector.delete();
+  }
+}
+
 /** Extract a full FeatureVector from decoded stereo channels. */
 function extractFeatures(essentia, left, right, sampleRate) {
   const leftVector = essentia.arrayToVector(left);
   const rightVector = essentia.arrayToVector(right);
 
-  const loudness = essentia.LoudnessEBUR128(
-    leftVector,
-    rightVector,
-    0.1,
-    sampleRate,
-    false,
-  );
+  const loudness = measureEbuLoudness(essentia, left, right, sampleRate);
 
   const monoResult = essentia.MonoMixer(leftVector, rightVector);
   const mono = essentia.vectorToArray(monoResult.audio);
@@ -415,7 +574,6 @@ function extractFeatures(essentia, left, right, sampleRate) {
 
   const peakDb = computeSamplePeakDb(left, right);
   // LoudnessEBUR128 can yield non-finite values on silent/near-silent windows.
-  // Keep in sync with src/lib/extract-features.ts.
   const rawIntegrated = loudness.integratedLoudness;
   const integratedLoudness = Number.isFinite(rawIntegrated)
     ? rawIntegrated
@@ -521,15 +679,24 @@ function aggregateFeatureVectors(windows) {
   };
 }
 
-function buildFingerprint(windows) {
-  return {
+function buildFingerprint(windows, matchWindows) {
+  const fp = {
     version: 2,
     aggregate: aggregateFeatureVectors(windows),
     windows,
   };
+  if (matchWindows && matchWindows.length > 0) {
+    fp.matchWindows = matchWindows;
+  }
+  return fp;
 }
 
-function extractFingerprint(essentia, left, right, sampleRate) {
+/**
+ * Windowed feature extraction over an arbitrary sub-range, reusing
+ * planAnalysisWindows so a short match slice gets the same window count/size
+ * a preview of that length would.
+ */
+function extractWindowed(essentia, left, right, sampleRate) {
   const n = Math.min(left.length, right.length);
   const durationSec = n / sampleRate;
   const { count, windowSec } = planAnalysisWindows(durationSec);
@@ -553,8 +720,50 @@ function extractFingerprint(essentia, left, right, sampleRate) {
   if (windows.length === 0) {
     windows.push(extractFeatures(essentia, left, right, sampleRate));
   }
+  return windows;
+}
 
-  return buildFingerprint(windows);
+/**
+ * A short, representative excerpt of the full mix — centered on its loudest
+ * part, the same length a commercial preview would be — so ranking compares
+ * like with like instead of the mix's intro against a reference's chorus.
+ */
+function extractMatchSlice(essentia, left, right, sampleRate) {
+  const n = Math.min(left.length, right.length);
+  const durationSec = n / sampleRate;
+  const sliceSeconds = Math.min(MATCH_SLICE_SECONDS, durationSec);
+  if (sliceSeconds >= durationSec) {
+    // Track is already shorter than a preview — the full windows ARE the
+    // match slice, no need to extract twice.
+    return null;
+  }
+
+  const searchSeconds = Math.min(LOUDEST_SEARCH_SECONDS, sliceSeconds);
+  const mono = mixToMono(left, right);
+  const loudestStart = findLoudestWindowStartSeconds(
+    mono,
+    sampleRate,
+    searchSeconds,
+  );
+  const loudestCenter = loudestStart + searchSeconds / 2;
+
+  let sliceStartSec = loudestCenter - sliceSeconds / 2;
+  sliceStartSec = Math.max(0, Math.min(sliceStartSec, durationSec - sliceSeconds));
+  const sliceStart = Math.floor(sliceStartSec * sampleRate);
+  const sliceEnd = Math.min(n, sliceStart + Math.floor(sliceSeconds * sampleRate));
+
+  return extractWindowed(
+    essentia,
+    left.subarray(sliceStart, sliceEnd),
+    right.subarray(sliceStart, sliceEnd),
+    sampleRate,
+  );
+}
+
+function extractFingerprint(essentia, left, right, sampleRate) {
+  const windows = extractWindowed(essentia, left, right, sampleRate);
+  const matchWindows = extractMatchSlice(essentia, left, right, sampleRate);
+  return buildFingerprint(windows, matchWindows);
 }
 
 self.onmessage = async (event) => {

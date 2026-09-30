@@ -1,5 +1,12 @@
-import { sql } from "@/lib/db";
-import type { WeightMultipliers } from "@/lib/matching";
+import type { MatchGenre } from "@/lib/genres";
+import { clampMultiplier, type WeightMultipliers } from "@/lib/matching";
+
+// `sql` is imported dynamically inside each DB-touching function below,
+// not at module top — src/lib/db.ts throws at import time if DATABASE_URL
+// isn't set, which would otherwise make every pure function in this file
+// (learningRate, decayFactor, ...) un-importable from a plain `node:test`
+// run that has no reason to load env vars. See scripts/seed-shelf.ts for
+// the same pattern used for the same reason.
 
 const DEFAULT_MULTIPLIERS: Required<WeightMultipliers> = {
   loudness: 1,
@@ -15,8 +22,102 @@ const DEFAULT_MULTIPLIERS: Required<WeightMultipliers> = {
   dynamicsExt: 1,
 };
 
-function clamp(value: number): number {
-  return Math.min(1.3, Math.max(0.7, value));
+export type FeedbackSource = "engage" | "save" | "reject";
+
+/** n=0 -> 0.05, shrinking as a genre's own sample count grows — never zero. */
+const STEP_MAX = 0.05;
+const HALF_LIFE_SAMPLES = 20;
+
+/** A genre untouched for GRACE_DAYS is unaffected; it then relaxes toward 1.0. */
+const GRACE_DAYS = 14;
+const DECAY_WINDOW_DAYS = 60;
+
+/** An explicit save is a far more confident signal than carousel drift. */
+const SAVE_STEP_MULTIPLIER = 3;
+/** Deliberately less than a save — a rejection only tells us this one is wrong. */
+const REJECT_STEP_MULTIPLIER = 2;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** Shrinking learning rate: early per-genre samples move it more than later ones. */
+export function learningRate(sampleCount: number): number {
+  return STEP_MAX / (1 + sampleCount / HALF_LIFE_SAMPLES);
+}
+
+/** 1 inside the grace window, falling linearly to 0 over the decay window. */
+export function decayFactor(elapsedDays: number): number {
+  if (elapsedDays <= GRACE_DAYS) return 1;
+  return Math.max(0, 1 - (elapsedDays - GRACE_DAYS) / DECAY_WINDOW_DAYS);
+}
+
+/**
+ * Lazy, read-time staleness decay back toward neutral (1.0) — no cron needed.
+ * A genre row that hasn't been touched in a while reads closer to neutral
+ * without anything ever writing that back, until fresh feedback arrives.
+ */
+export function applyStaleDecay(
+  multipliers: WeightMultipliers,
+  updatedAt: Date,
+  now: Date,
+): WeightMultipliers {
+  const elapsedDays = (now.getTime() - updatedAt.getTime()) / MS_PER_DAY;
+  const factor = decayFactor(elapsedDays);
+  const out: WeightMultipliers = {};
+  for (const key of Object.keys(multipliers) as Array<keyof WeightMultipliers>) {
+    const value = multipliers[key];
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    out[key] = clampMultiplier(1 + (value - 1) * factor);
+  }
+  return out;
+}
+
+function stepMultiplierFor(source: FeedbackSource): number {
+  switch (source) {
+    case "save":
+      return SAVE_STEP_MULTIPLIER;
+    case "reject":
+      return REJECT_STEP_MULTIPLIER;
+    case "engage":
+      return 1;
+    default: {
+      const exhaustive: never = source;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Promote axes where the chosen match was closer than top (they predict
+ * preference); demote axes where top was closer (they don't). A rejection
+ * has no positive counterpart to promote — it only tells us which axes made
+ * a wrong match look deceptively close, so those get demoted and nothing
+ * gets promoted.
+ */
+export function computeNudgedMultipliers(input: {
+  current: WeightMultipliers;
+  sampleCount: number;
+  chosenCloserGroups: Array<keyof WeightMultipliers>;
+  skippedCloserGroups: Array<keyof WeightMultipliers>;
+  source: FeedbackSource;
+}): WeightMultipliers {
+  const rate = learningRate(input.sampleCount) * stepMultiplierFor(input.source);
+  const current: Required<WeightMultipliers> = {
+    ...DEFAULT_MULTIPLIERS,
+    ...input.current,
+  };
+
+  const promote =
+    input.source === "reject" ? [] : input.chosenCloserGroups;
+  const demote =
+    input.source === "reject" ? input.chosenCloserGroups : input.skippedCloserGroups;
+
+  for (const key of promote) {
+    current[key] = clampMultiplier(current[key] * (1 + rate));
+  }
+  for (const key of demote) {
+    current[key] = clampMultiplier(current[key] * (1 - rate));
+  }
+  return current;
 }
 
 function parseMultipliers(raw: unknown): WeightMultipliers {
@@ -27,56 +128,82 @@ function parseMultipliers(raw: unknown): WeightMultipliers {
   >) {
     const v = (raw as Record<string, unknown>)[key];
     if (typeof v === "number" && Number.isFinite(v)) {
-      out[key] = clamp(v);
+      out[key] = clampMultiplier(v);
     }
   }
   return out;
 }
 
-/** Global gentle weight multipliers learned from non-top match clicks. */
-export async function getLearnedWeightMultipliers(): Promise<WeightMultipliers> {
+function parseUpdatedAt(value: unknown): Date {
+  return typeof value === "string" ? new Date(value) : (value as Date);
+}
+
+/** Genre-scoped, decayed weight multipliers for one live search. Read-only. */
+export async function getLearnedWeightMultipliers(
+  genre: MatchGenre,
+): Promise<WeightMultipliers> {
   try {
+    const { sql } = await import("@/lib/db");
     const rows = await sql`
-      SELECT multipliers
+      SELECT multipliers, updated_at
       FROM ranking_weight_state
-      WHERE id = 1
+      WHERE genre = ${genre}
       LIMIT 1
     `;
     if (rows.length === 0) return {};
-    return parseMultipliers(rows[0].multipliers);
+    const multipliers = parseMultipliers(rows[0].multipliers);
+    const updatedAt = parseUpdatedAt(rows[0].updated_at);
+    return applyStaleDecay(multipliers, updatedAt, new Date());
   } catch {
-    // Table may not exist yet before migration 005.
+    // Table may not exist yet before migration 006.
     return {};
   }
 }
 
 /**
- * Nudge weight groups toward features where the chosen (non-top) match
- * was closer than the top result. Exponential step, clamped ±30%.
+ * Nudge one genre's weight groups toward features where the chosen match was
+ * closer than the top result (or, for a rejection, away from features that
+ * made it look deceptively close). Applies staleness decay to the row's
+ * *current* state first, so a long-dormant genre catches up on read instead
+ * of needing a scheduled job.
  */
 export async function nudgeWeightsFromPreference(input: {
+  genre: MatchGenre;
   chosenCloserGroups: Array<keyof WeightMultipliers>;
   skippedCloserGroups: Array<keyof WeightMultipliers>;
+  source: FeedbackSource;
 }): Promise<void> {
-  const STEP = 0.03;
   try {
-    const current = {
-      ...DEFAULT_MULTIPLIERS,
-      ...(await getLearnedWeightMultipliers()),
-    };
+    const { sql } = await import("@/lib/db");
+    const rows = await sql`
+      SELECT multipliers, sample_count, updated_at
+      FROM ranking_weight_state
+      WHERE genre = ${input.genre}
+      LIMIT 1
+    `;
+    const sampleCount = rows.length > 0 ? Number(rows[0].sample_count ?? 0) : 0;
+    const effectiveCurrent =
+      rows.length > 0
+        ? applyStaleDecay(
+            parseMultipliers(rows[0].multipliers),
+            parseUpdatedAt(rows[0].updated_at),
+            new Date(),
+          )
+        : {};
 
-    for (const key of input.chosenCloserGroups) {
-      current[key] = clamp(current[key] * (1 + STEP));
-    }
-    for (const key of input.skippedCloserGroups) {
-      current[key] = clamp(current[key] * (1 - STEP));
-    }
+    const next = computeNudgedMultipliers({
+      current: effectiveCurrent,
+      sampleCount,
+      chosenCloserGroups: input.chosenCloserGroups,
+      skippedCloserGroups: input.skippedCloserGroups,
+      source: input.source,
+    });
 
     await sql`
-      INSERT INTO ranking_weight_state (id, multipliers, updated_at, sample_count)
-      VALUES (1, ${JSON.stringify(current)}::jsonb, now(), 1)
-      ON CONFLICT (id) DO UPDATE SET
-        multipliers = ${JSON.stringify(current)}::jsonb,
+      INSERT INTO ranking_weight_state (genre, multipliers, updated_at, sample_count)
+      VALUES (${input.genre}, ${JSON.stringify(next)}::jsonb, now(), 1)
+      ON CONFLICT (genre) DO UPDATE SET
+        multipliers = ${JSON.stringify(next)}::jsonb,
         updated_at = now(),
         sample_count = ranking_weight_state.sample_count + 1
     `;

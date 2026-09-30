@@ -14,8 +14,8 @@ Picking reference tracks is slow and subjective. Engineers often jump between st
 
 1. Tag the mix with **Discogs-EffNet in the browser** (genre / style)
 2. Search **Deezer + iTunes** with style-first queries (+ instrument hints from the style)
-3. **Hard-filter** candidates to the genre neighborhood (no Pop refs for Deep House just because LUFS matches)
-4. Analyze previews with Essentia and **keep only hits that clear a style and tone bar**
+3. **Hard-filter** candidates to the genre neighborhood (no Pop refs for Deep House just because LUFS matches) — and never leave it: a thin result never falls back to a cross-genre "tone twin"
+4. Analyze a representative ~30s slice of the mix (same windowing a preview gets) with Essentia and rank what's left in style — always the closest N, honestly labeled, not gated to empty by a hard cutoff
 5. A/B on the loudest section of each preview
 
 No paid music-AI API and no always-on Python worker required for the live path.
@@ -28,9 +28,9 @@ No paid music-AI API and no always-on Python worker required for the live path.
 | --- | --- |
 | **Client audio ML** | Essentia.js (WASM) — metering + MFCC, spectral, HPCP, multi-window fingerprints |
 | **Genre tagging** | Discogs-EffNet (TF.js) — 400 styles + optional 512-d penultimate embedding |
-| **Discovery** | Style-first Deezer/iTunes search + hard genre neighborhood gate |
-| **Hydration cache** | Neon `reference_tracks` stores analyzed previews (not the search index) |
-| **Similarity ranking** | Fixed-scale tone distance plus genre closeness; weak hits dropped; click-learned sonic weights |
+| **Discovery** | Style-first Deezer/iTunes search + hard genre neighborhood gate, never a cross-genre fallback |
+| **Shelf** | Neon `reference_tracks` — a live hydration cache, topped up on purpose per style by `scripts/seed-shelf.ts` (`npm run seed:shelf`) so a style search isn't starting from zero |
+| **Similarity ranking** | Fixed-scale tone distance (matched-length excerpt vs. preview) plus genre closeness; always ranks and returns the closest in-style hits; click-learned sonic weights |
 | **Backend** | Next.js Route Handlers, Clerk auth, Neon Postgres, Cloudflare R2 |
 | **Payments** | Stripe Checkout credit packs; 1 credit = 1 similarity search |
 | **UX** | Upload → match carousel, EQ meters, loudest-window A/B, projects + history |

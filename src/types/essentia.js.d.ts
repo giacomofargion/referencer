@@ -34,7 +34,14 @@ declare module "essentia.js" {
       hopSize?: number,
       sampleRate?: number,
       startAtZero?: boolean,
-    ): { integratedLoudness: number; loudnessRange: number };
+    ): {
+      integratedLoudness: number;
+      loudnessRange: number;
+      // Also returns per-frame loudness WASM vectors that must be deleted —
+      // unused here but real at runtime; see releaseLoudnessVectors.
+      momentaryLoudness?: Vec;
+      shortTermLoudness?: Vec;
+    };
     MonoMixer(
       left: unknown,
       right: unknown,

@@ -35,6 +35,21 @@ function getEssentia(): EssentiaInstance {
   return essentiaSingleton;
 }
 
+/**
+ * Emscripten's `abort()` is not recoverable — once the WASM runtime hits
+ * one (a malformed/edge-case input: near-silence, NaN samples, an unusual
+ * sample rate), every later call into that same instance fails identically
+ * forever, because the module is a process-lifetime singleton. On a warm
+ * serverless instance this means one bad preview can silently break every
+ * later request until the instance cold-starts — confirmed by a seed run
+ * where one bad track killed ~230 consecutive analyses in the same process.
+ * Call this from a catch around any WASM-touching entry point so the next
+ * call gets a fresh instance instead of inheriting the poisoned one.
+ */
+function resetEssentiaAfterFailure(): void {
+  essentiaSingleton = null;
+}
+
 function safeDelete(obj: { delete?: () => void } | null | undefined) {
   if (obj && typeof obj.delete === "function") obj.delete();
 }
@@ -418,8 +433,143 @@ function computeFrameDescriptors(
   };
 }
 
+interface Biquad {
+  b0: number;
+  b1: number;
+  b2: number;
+  a1: number;
+  a2: number;
+}
+
+/**
+ * Essentia's K-weighting IIR is only trustworthy at 44.1 and 48 kHz.
+ * At 96 kHz the same full-scale tone comes back as the -70 LUFS silence
+ * gate, so higher rates are low-passed and measured at 48 kHz.
+ * Keep in sync with public/workers/analysis-worker.js.
+ */
+const NATIVE_LOUDNESS_RATES = new Set([44100, 48000]);
+const LOUDNESS_TARGET_RATE = 48000;
+
+function lowpassBiquad(sampleRate: number, cutoff: number, q: number): Biquad {
+  const w0 = (2 * Math.PI * cutoff) / sampleRate;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cos = Math.cos(w0);
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 - cos) / 2 / a0,
+    b1: (1 - cos) / a0,
+    b2: (1 - cos) / 2 / a0,
+    a1: (-2 * cos) / a0,
+    a2: (1 - alpha) / a0,
+  };
+}
+
+function applyBiquad(input: Float32Array, coeffs: Biquad): Float32Array {
+  const out = new Float32Array(input.length);
+  let x1 = 0;
+  let x2 = 0;
+  let y1 = 0;
+  let y2 = 0;
+  for (let i = 0; i < input.length; i++) {
+    const x0 = input[i];
+    const y0 =
+      coeffs.b0 * x0 +
+      coeffs.b1 * x1 +
+      coeffs.b2 * x2 -
+      coeffs.a1 * y1 -
+      coeffs.a2 * y2;
+    out[i] = y0;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+  }
+  return out;
+}
+
+/** 4th-order lowpass, then linear resample onto 48 kHz for the EBU meter. */
+function resampleForLoudness(
+  input: Float32Array,
+  sampleRate: number,
+): Float32Array {
+  const cutoff = Math.min(
+    20000,
+    LOUDNESS_TARGET_RATE * 0.45,
+    sampleRate * 0.45,
+  );
+  // Butterworth Qs for two cascaded biquads (4th order).
+  let filtered = input;
+  for (const q of [0.5411961, 1.306563]) {
+    filtered = applyBiquad(filtered, lowpassBiquad(sampleRate, cutoff, q));
+  }
+  const ratio = sampleRate / LOUDNESS_TARGET_RATE;
+  const outLength = Math.max(1, Math.floor(input.length / ratio));
+  const out = new Float32Array(outLength);
+  const last = filtered.length - 1;
+  for (let i = 0; i < outLength; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos);
+    const frac = pos - i0;
+    const s0 = filtered[i0] ?? 0;
+    const s1 = filtered[Math.min(i0 + 1, last)] ?? 0;
+    out[i] = s0 * (1 - frac) + s1 * frac;
+  }
+  return out;
+}
+
+function releaseLoudnessVectors(loudness: {
+  momentaryLoudness?: { delete?: () => void };
+  shortTermLoudness?: { delete?: () => void };
+}) {
+  loudness.momentaryLoudness?.delete?.();
+  loudness.shortTermLoudness?.delete?.();
+}
+
+function measureEbuLoudness(
+  essentia: EssentiaInstance,
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+): { integratedLoudness: number; loudnessRange: number } {
+  const native = NATIVE_LOUDNESS_RATES.has(sampleRate);
+  const leftIn = native ? left : resampleForLoudness(left, sampleRate);
+  const rightIn = native ? right : resampleForLoudness(right, sampleRate);
+  const rate = native ? sampleRate : LOUDNESS_TARGET_RATE;
+  const leftVector = essentia.arrayToVector(leftIn);
+  const rightVector = essentia.arrayToVector(rightIn);
+  try {
+    const loudness = essentia.LoudnessEBUR128(
+      leftVector,
+      rightVector,
+      0.1,
+      rate,
+      false,
+    );
+    const integratedLoudness = loudness.integratedLoudness as number;
+    const loudnessRange = loudness.loudnessRange as number;
+    releaseLoudnessVectors(loudness);
+    return { integratedLoudness, loudnessRange };
+  } finally {
+    leftVector.delete();
+    rightVector.delete();
+  }
+}
+
 /** Extract a full FeatureVector from decoded stereo channels. */
 export function extractFeatures(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+): FeatureVector {
+  try {
+    return extractFeaturesUnsafe(left, right, sampleRate);
+  } catch (error) {
+    resetEssentiaAfterFailure();
+    throw error;
+  }
+}
+
+function extractFeaturesUnsafe(
   left: Float32Array,
   right: Float32Array,
   sampleRate: number,
@@ -428,13 +578,7 @@ export function extractFeatures(
   const leftVector = essentia.arrayToVector(left);
   const rightVector = essentia.arrayToVector(right);
 
-  const loudness = essentia.LoudnessEBUR128(
-    leftVector,
-    rightVector,
-    0.1,
-    sampleRate,
-    false,
-  );
+  const loudness = measureEbuLoudness(essentia, left, right, sampleRate);
 
   const monoResult = essentia.MonoMixer(leftVector, rightVector);
   const mono = essentia.vectorToArray(monoResult.audio);
@@ -444,11 +588,11 @@ export function extractFeatures(
 
   const peakDb = computeSamplePeakDb(left, right);
   // LoudnessEBUR128 can yield non-finite values on silent/near-silent windows.
-  const rawIntegrated = loudness.integratedLoudness as number;
+  const rawIntegrated = loudness.integratedLoudness;
   const integratedLoudness = Number.isFinite(rawIntegrated)
     ? rawIntegrated
     : -70; // EBU R128 absolute gate
-  const rawRange = loudness.loudnessRange as number;
+  const rawRange = loudness.loudnessRange;
   const loudnessRangeDb = Number.isFinite(rawRange) ? rawRange : 0;
   // Existing safe fallback when peak or integrated loudness is unusable.
   const plrDb =
@@ -505,6 +649,23 @@ export function planAnalysisWindows(
 
 /** Multi-window fingerprint (equal segments) + loudest-window seek offset. */
 export function extractFingerprint(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  embedding?: number[],
+): { fingerprint: FeatureFingerprint; loudestStartSec: number } {
+  try {
+    return extractFingerprintUnsafe(left, right, sampleRate, embedding);
+  } catch (error) {
+    // extractFeatures already resets on its own failures; this also covers
+    // any future WASM call added here directly, so one entry point can't
+    // regress the protection by skipping the reset.
+    resetEssentiaAfterFailure();
+    throw error;
+  }
+}
+
+function extractFingerprintUnsafe(
   left: Float32Array,
   right: Float32Array,
   sampleRate: number,

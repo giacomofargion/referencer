@@ -5,9 +5,11 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import type { MatchResult } from "@/components/match-card";
+import { RejectMatchButton } from "@/components/reject-match-button";
 import { ReferencesLightbox } from "@/components/references-lightbox";
 import { SaveReferenceButton } from "@/components/save-reference-button";
 import { Button } from "@/components/ui/button";
+import { groupAbsDeltas } from "@/lib/feedback-deltas";
 import {
   orderDisplayedMatches,
   type WeightPreset,
@@ -147,6 +149,27 @@ export function SessionResults({
           setActiveIndex(0);
         }}
         discoveryNote={discoveryNote}
+        onActiveMatchEngage={(match, rank) => {
+          if (rank < 2) return;
+          const top = displayedMatches[0];
+          if (!top) return;
+          void fetch("/api/match/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              uploadId,
+              chosenReferenceId: match.id,
+              shownOrder: displayedMatches.length,
+              chosenRank: rank,
+              groupDeltas: {
+                chosen: groupAbsDeltas(clientFeatures, match.featureVector),
+                top: groupAbsDeltas(clientFeatures, top.featureVector),
+              },
+            }),
+          }).catch(() => {
+            /* feedback is best-effort */
+          });
+        }}
         renderSaveControl={(match) => (
           <SaveReferenceButton
             referenceTrackId={match.id}
@@ -163,6 +186,59 @@ export function SessionResults({
                   item.id === match.id ? { ...item, saved } : item,
                 ),
               );
+              // An explicit save is a far more confident positive signal
+              // than carousel focus drifting to a non-top result.
+              if (saved) {
+                const top = displayedMatches[0];
+                if (top) {
+                  const rank =
+                    displayedMatches.findIndex((m) => m.id === match.id) + 1;
+                  void fetch("/api/match/feedback", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      uploadId,
+                      chosenReferenceId: match.id,
+                      shownOrder: displayedMatches.length,
+                      chosenRank: rank > 0 ? rank : 1,
+                      source: "save",
+                      groupDeltas: {
+                        chosen: groupAbsDeltas(clientFeatures, match.featureVector),
+                        top: groupAbsDeltas(clientFeatures, top.featureVector),
+                      },
+                    }),
+                  }).catch(() => {
+                    /* feedback is best-effort */
+                  });
+                }
+              }
+            }}
+          />
+        )}
+        renderRejectControl={(match) => (
+          <RejectMatchButton
+            referenceTrackId={match.id}
+            uploadId={uploadId}
+            onReported={async () => {
+              const top = displayedMatches[0];
+              if (!top) return;
+              const rank =
+                displayedMatches.findIndex((m) => m.id === match.id) + 1;
+              await fetch("/api/match/feedback", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  uploadId,
+                  chosenReferenceId: match.id,
+                  shownOrder: displayedMatches.length,
+                  chosenRank: rank > 0 ? rank : 1,
+                  source: "reject",
+                  groupDeltas: {
+                    chosen: groupAbsDeltas(clientFeatures, match.featureVector),
+                    top: groupAbsDeltas(clientFeatures, top.featureVector),
+                  },
+                }),
+              });
             }}
           />
         )}

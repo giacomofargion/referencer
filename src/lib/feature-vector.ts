@@ -64,11 +64,23 @@ export function getAggregateFeatures(
   return isFeatureFingerprint(stored) ? stored.aggregate : stored;
 }
 
-/** Section vectors for multi-window ranking (single-element for v1). */
+/** Section vectors spanning the full track (single-element for v1). For UI / whole-track stats. */
 export function getFeatureWindows(
   stored: StoredFingerprint,
 ): FeatureVector[] {
   return isFeatureFingerprint(stored) ? stored.windows : [stored];
+}
+
+/**
+ * Section vectors for a short representative excerpt — what ranking should
+ * compare. Falls back to `getFeatureWindows` for references (already a fair
+ * ~30s comparison) and for rows analyzed before `matchWindows` existed.
+ */
+export function getMatchWindows(stored: StoredFingerprint): FeatureVector[] {
+  if (isFeatureFingerprint(stored) && stored.matchWindows?.length) {
+    return stored.matchWindows;
+  }
+  return getFeatureWindows(stored);
 }
 
 export function getEmbedding(
@@ -169,6 +181,7 @@ export function aggregateFeatureVectors(
 export function buildFingerprint(
   windows: FeatureVector[],
   embedding?: number[],
+  matchWindows?: FeatureVector[],
 ): FeatureFingerprint {
   const fp: FeatureFingerprint = {
     version: 2,
@@ -177,6 +190,9 @@ export function buildFingerprint(
   };
   if (embedding && isNumberArray(embedding, DISCOGS_EMBEDDING_DIM)) {
     fp.embedding = embedding;
+  }
+  if (matchWindows && matchWindows.length > 0) {
+    fp.matchWindows = matchWindows;
   }
   return fp;
 }

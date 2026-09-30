@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import type { MatchResult } from "@/components/match-card";
 import { ProjectPicker } from "@/components/project-picker";
+import { RejectMatchButton } from "@/components/reject-match-button";
 import { ReferencesLightbox } from "@/components/references-lightbox";
 import { SaveReferenceButton } from "@/components/save-reference-button";
 import { Button } from "@/components/ui/button";
@@ -68,6 +69,14 @@ export function UploadCard() {
   const [genreOverride, setGenreOverride] = useState<MatchGenre | "">("");
   const [detectedGenre, setDetectedGenre] = useState<MatchGenre | null>(null);
   const [detectedLabel, setDetectedLabel] = useState<string | null>(null);
+  const [detectedConfidence, setDetectedConfidence] = useState<number | null>(
+    null,
+  );
+  // Next-closest styles the classifier considered — shown so a low-confidence
+  // pick is legible instead of silently spending a credit on the wrong style.
+  const [detectedAlternates, setDetectedAlternates] = useState<
+    Array<{ label: string; score: number }>
+  >([]);
   const [phase, setPhase] = useState<Phase>({ step: "idle" });
   const [activeIndex, setActiveIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -119,6 +128,8 @@ export function UploadCard() {
     setGenreOverride("");
     setDetectedGenre(null);
     setDetectedLabel(null);
+    setDetectedConfidence(null);
+    setDetectedAlternates([]);
     setActiveIndex(0);
     setLightboxOpen(false);
   }
@@ -151,6 +162,10 @@ export function UploadCard() {
         discogsLabel = tagged.discogsLabel;
         discogsEmbedding = tagged.embedding;
         setDetectedLabel(tagged.discogsLabel);
+        setDetectedConfidence(tagged.confidence);
+        setDetectedAlternates(
+          tagged.topDiscogs.filter((t) => t.label !== tagged.discogsLabel).slice(0, 2),
+        );
         const mapped = tagged.discogsLabel
           ? discogsLabelToGenre(tagged.discogsLabel)
           : null;
@@ -393,6 +408,19 @@ export function UploadCard() {
                   </option>
                 ))}
               </select>
+              {!genreOverride && detectedLabel && detectedConfidence != null && (
+                <p className="text-xs text-text-muted">
+                  {Math.round(detectedConfidence * 100)}% confidence
+                  {detectedAlternates.length > 0
+                    ? ` · closest alternates: ${detectedAlternates
+                        .map((a) => a.label.split("---").pop() ?? a.label)
+                        .join(", ")}`
+                    : ""}
+                  {detectedConfidence < 0.4
+                    ? " — low confidence, worth picking a genre manually above"
+                    : ""}
+                </p>
+              )}
             </div>
 
             <ProjectPicker
@@ -584,6 +612,62 @@ export function UploadCard() {
                         item.id === match.id ? { ...item, saved } : item,
                       ),
                     };
+                  });
+                  // An explicit save is a far more confident positive signal
+                  // than carousel focus drifting to a non-top result.
+                  if (saved && phase.step === "done") {
+                    const top = displayedMatches[0];
+                    if (top) {
+                      const client = getAggregateFeatures(phase.featureVector);
+                      const rank =
+                        displayedMatches.findIndex((m) => m.id === match.id) + 1;
+                      void authedFetch("/api/match/feedback", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          uploadId: phase.uploadId,
+                          chosenReferenceId: match.id,
+                          shownOrder: displayedMatches.length,
+                          chosenRank: rank > 0 ? rank : 1,
+                          source: "save",
+                          groupDeltas: {
+                            chosen: groupAbsDeltas(client, match.featureVector),
+                            top: groupAbsDeltas(client, top.featureVector),
+                          },
+                        }),
+                      }).catch(() => {
+                        /* feedback is best-effort */
+                      });
+                    }
+                  }
+                }}
+              />
+            )}
+            renderRejectControl={(match) => (
+              <RejectMatchButton
+                referenceTrackId={match.id}
+                uploadId={phase.uploadId}
+                onReported={async () => {
+                  if (phase.step !== "done") return;
+                  const top = displayedMatches[0];
+                  if (!top) return;
+                  const client = getAggregateFeatures(phase.featureVector);
+                  const rank =
+                    displayedMatches.findIndex((m) => m.id === match.id) + 1;
+                  await authedFetch("/api/match/feedback", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      uploadId: phase.uploadId,
+                      chosenReferenceId: match.id,
+                      shownOrder: displayedMatches.length,
+                      chosenRank: rank > 0 ? rank : 1,
+                      source: "reject",
+                      groupDeltas: {
+                        chosen: groupAbsDeltas(client, match.featureVector),
+                        top: groupAbsDeltas(client, top.featureVector),
+                      },
+                    }),
                   });
                 }}
               />

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  MAX_GENRE_CLOSENESS,
-  MAX_SONIC_DISTANCE,
-  passesReferenceFit,
+  isStrongReferenceFit,
   rankReferences,
   sonicDistance,
+  STRONG_FIT_GENRE_MAX,
+  STRONG_FIT_SONIC_MAX,
   WEIGHT_PRESETS,
 } from "@/lib/matching";
 import type { FeatureVector } from "@/lib/types";
@@ -42,12 +42,12 @@ describe("reference fit", () => {
     assert.ok(ranked[0].distance < ranked[1].distance);
   });
 
-  it("drops a far genre even when the tone is identical", () => {
+  it("does not call a far genre a strong fit even when the tone is identical", () => {
     const client = makeFeatures();
     const sonic = sonicDistance(client, client, WEIGHT_PRESETS.balanced);
     assert.ok(sonic < 0.05);
-    assert.equal(passesReferenceFit(sonic, 0.9), false);
-    assert.ok(0.9 > MAX_GENRE_CLOSENESS);
+    assert.equal(isStrongReferenceFit(sonic, 0.9), false);
+    assert.ok(0.9 > STRONG_FIT_GENRE_MAX);
   });
 
   it("keeps a louder commercial master when the tone still matches", () => {
@@ -62,7 +62,7 @@ describe("reference fit", () => {
       loudnessRangeDb: 4,
     });
     const sonic = sonicDistance(client, master, WEIGHT_PRESETS.balanced);
-    assert.equal(passesReferenceFit(sonic, 0.18), true);
+    assert.equal(isStrongReferenceFit(sonic, 0.18), true);
   });
 
   it("drops a different tonal balance even in the requested style", () => {
@@ -76,10 +76,50 @@ describe("reference fit", () => {
       WEIGHT_PRESETS.balanced,
     );
     assert.ok(
-      sonic > MAX_SONIC_DISTANCE,
+      sonic > STRONG_FIT_SONIC_MAX,
       `expected a different curve to miss the tone bar, got ${sonic}`,
     );
-    assert.equal(passesReferenceFit(sonic, 0), false);
+    assert.equal(isStrongReferenceFit(sonic, 0), false);
+  });
+
+  it("still returns the closest in-genre reference when nothing is a strong fit", () => {
+    // The old code gated the result list on this cap and, when nothing
+    // cleared it, reached into other genres for a tone twin. Ranking must
+    // never drop a weak-but-in-genre hit or leave the candidate pool.
+    const client = makeFeatures();
+    const near = makeFeatures({
+      frequencyBandEnergies: [0.02, 0.04, 0.06, 0.08, 0.1, 0.2, 0.5],
+    });
+    const farGenre = makeFeatures();
+    const ranked = rankReferences(client, [
+      { item: "near-style", features: near, genreCloseness: 0.18 },
+      { item: "far-genre", features: farGenre, genreCloseness: 0.9 },
+    ]);
+    const shortlist = ranked.slice(0, 8);
+    assert.deepEqual(
+      shortlist.map((hit) => hit.item),
+      ["near-style", "far-genre"],
+    );
+    assert.equal(
+      isStrongReferenceFit(shortlist[0].sonicDistance, shortlist[0].genreCloseness),
+      false,
+    );
+  });
+
+  it("keeps a nearer genre ahead of a better-sounding but far-genre candidate", () => {
+    // Genre closeness is part of the published score, so a pool that mixes
+    // genres (e.g. a broad parent-genre catalog fallback) still sorts the
+    // requested style first even when the far-genre tone is a closer match.
+    const client = makeFeatures();
+    const inGenre = makeFeatures({
+      frequencyBandEnergies: [0.06, 0.18, 0.16, 0.2, 0.18, 0.14, 0.08],
+    });
+    const farGenreCloserTone = makeFeatures();
+    const ranked = rankReferences(client, [
+      { item: "far-genre-close-tone", features: farGenreCloserTone, genreCloseness: 0.9 },
+      { item: "in-genre", features: inGenre, genreCloseness: 0.18 },
+    ]);
+    assert.equal(ranked[0]?.item, "in-genre");
   });
 
   it("tolerates short and long optional arrays without NaN", () => {

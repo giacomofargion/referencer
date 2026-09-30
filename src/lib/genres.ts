@@ -218,8 +218,28 @@ function escapeRegExp(value: string): string {
 }
 
 /**
- * Match an alias/genre as a standalone token (not a substring of another word).
- * Prevents e.g. "garage"/"industrial"/"fusion"/"pop" hitting inside unrelated words.
+ * Collapse "&" / "and" / "n" / apostrophes down to one joined form, so
+ * "Drum n Bass", "Drum & Bass", "Drum and Bass" and iTunes's jammed-together
+ * "Jungle/Drum'n'bass" all reduce to the same comparable string. Safe only
+ * for multi-word phrases — see the caller.
+ */
+function compactGenrePhrase(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&/g, " n ")
+    .replace(/\band\b/g, "n")
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * Match an alias/genre as a standalone token (not a substring of another
+ * word) — prevents e.g. "garage"/"industrial"/"fusion"/"pop" hitting inside
+ * unrelated words. For a multi-word style phrase ("Drum n Bass"), also try
+ * a joined-form match, since platforms spell these inconsistently ("Drum &
+ * Bass", "Jungle/Drum'n'bass") — safe for phrases because a coincidental
+ * substring collision needs several specific words in a row, unlike a
+ * single short alias.
  */
 function textContainsToken(haystack: string, token: string): boolean {
   const needle = token.trim().toLowerCase();
@@ -228,7 +248,10 @@ function textContainsToken(haystack: string, token: string): boolean {
     `(^|[^a-z0-9])${escapeRegExp(needle)}([^a-z0-9]|$)`,
     "i",
   );
-  return pattern.test(haystack);
+  if (pattern.test(haystack)) return true;
+  if (!needle.includes(" ")) return false;
+  const compactNeedle = compactGenrePhrase(needle);
+  return compactNeedle.length > 0 && compactGenrePhrase(haystack).includes(compactNeedle);
 }
 
 function textMatchesGenre(haystack: string, genre: MatchGenre): boolean {
@@ -385,6 +408,60 @@ export function combineGenreCloseness(
 ): number {
   const label = Math.min(1, Math.max(0, labelAffinity));
   return Math.min(1, 0.6 * queryCloseness(kind) + 0.4 * label);
+}
+
+/**
+ * A style string used as a free-text query also matches songs of that name
+ * ("Glitch", "Glitch (Original Mix)"). Those are not style references.
+ * Version suffixes still count as the bare title.
+ */
+export function isBareStyleTitle(title: string, query: string): boolean {
+  const normalize = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const titleNorm = normalize(title);
+  const queryNorm = normalize(query);
+  if (!titleNorm || !queryNorm) return false;
+  if (titleNorm === queryNorm) return true;
+  if (!titleNorm.startsWith(`${queryNorm} `)) return false;
+  const rest = titleNorm.slice(queryNorm.length).trim();
+  return /^(?:original|radio|extended|club|vip|remix|mix|edit|version|remaster(?:ed)?|mono|stereo|instrumental|live|deluxe)\b/.test(
+    rest,
+  );
+}
+
+/** Half-time grids around 86 BPM are the same tempo as 170–175. */
+export function isDrumAndBassTempo(bpm: number): boolean {
+  if (!Number.isFinite(bpm) || bpm <= 0) return false;
+  const inBand = (value: number) => value >= 165 && value <= 180;
+  return inBand(bpm) || inBand(bpm * 2);
+}
+
+/**
+ * Style is the retrieval key — it's what the user actually asked for, and
+ * iTunes-native style hits already carry a stable id (no throttled resolve
+ * call needed). The parent-genre chart is breadth filler for when a style
+ * is thin, not a peer of it: it's one coarse Deezer bucket (Electronic's
+ * chart is "Dance," with no Drum & Bass id of its own), so it's hydrated
+ * last, only spending remaining budget once the real style hits are queued.
+ */
+export function hydrationOrder(kind: DiscoveryQueryKind): number {
+  switch (kind) {
+    case "style":
+      return 0;
+    case "style-instrument":
+      return 1;
+    case "genre":
+      return 2;
+    case "related":
+      return 3;
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
+  }
 }
 
 /** Closest query wins when the same track is returned by several searches. */

@@ -42,6 +42,8 @@ interface ReferencesLightboxProps {
   discoveryNote: string | null;
   /** Optional save control for the active match (star → project shortlist). */
   renderSaveControl?: (match: MatchResult) => ReactNode;
+  /** Optional "not a good match" control for the active match. */
+  renderRejectControl?: (match: MatchResult) => ReactNode;
   /** Fired when the user focuses a match (carousel change) — for preference learning. */
   onActiveMatchEngage?: (match: MatchResult, rank: number) => void;
 }
@@ -58,6 +60,7 @@ export function ReferencesLightbox({
   onWeightPresetChange,
   discoveryNote,
   renderSaveControl,
+  renderRejectControl,
   onActiveMatchEngage,
 }: ReferencesLightboxProps) {
   // Portals never SSR, so the hydration render must also produce nothing —
@@ -232,6 +235,11 @@ export function ReferencesLightbox({
                       saveControl={
                         renderSaveControl
                           ? renderSaveControl(matches[activeIndex])
+                          : undefined
+                      }
+                      rejectControl={
+                        renderRejectControl
+                          ? renderRejectControl(matches[activeIndex])
                           : undefined
                       }
                     />

@@ -5,7 +5,7 @@ import {
 import { FREQUENCY_BANDS, type FeatureVector, type StoredFingerprint } from "@/lib/types";
 import {
   getAggregateFeatures,
-  getFeatureWindows,
+  getMatchWindows,
 } from "@/lib/feature-vector";
 
 export interface RankedMatch<T> {
@@ -108,13 +108,14 @@ export type WeightMultipliers = Partial<Record<keyof Weights, number>>;
 export const GENRE_FIT_WEIGHT = 0.62;
 
 /**
- * Reject a candidate when either axis is past these caps.
- * Genre is capped on its own so a tone twin from a far genre cannot
- * sneak in by having a tiny sonic distance. Tone is capped on its own
- * so the right genre cannot excuse a different record.
+ * Calibrated "this is a genuinely close reference" line on each axis.
+ * These no longer gate the result list (a thin or unlucky pool must not
+ * come back empty, or reach outside the genre for a tone twin) — they only
+ * label the shortlist so the UI can say "strong match" honestly instead of
+ * implying every result cleared a bar.
  */
-export const MAX_SONIC_DISTANCE = 0.24;
-export const MAX_GENRE_CLOSENESS = 0.62;
+export const STRONG_FIT_SONIC_MAX = 0.24;
+export const STRONG_FIT_GENRE_MAX = 0.62;
 
 function tempoDistance(a: number, b: number): number {
   const direct = Math.abs(a - b);
@@ -127,7 +128,7 @@ function isNumber(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function clampMultiplier(value: number): number {
+export function clampMultiplier(value: number): number {
   return Math.min(1.3, Math.max(0.7, value));
 }
 
@@ -338,8 +339,11 @@ function averageWindowSonic(
   candidate: StoredFingerprint,
   weights: Weights,
 ): number {
-  const qWindows = getFeatureWindows(query);
-  const cWindows = getFeatureWindows(candidate);
+  // Compare like with like: a short representative excerpt of the client
+  // mix against the reference preview, not the mix's full intro-to-outro
+  // sweep against a ~30s clip. See getMatchWindows.
+  const qWindows = getMatchWindows(query);
+  const cWindows = getMatchWindows(candidate);
   const n = Math.min(qWindows.length, cWindows.length);
   if (n <= 0) {
     return sonicDistance(
@@ -366,13 +370,19 @@ export function referenceFitScore(
   );
 }
 
-export function passesReferenceFit(
+/**
+ * Whether a hit is close enough on both axes to call a genuinely strong
+ * reference, rather than just the best of what a thin pool had. Informational
+ * only — never used to drop a result or leave the genre. See
+ * STRONG_FIT_SONIC_MAX / STRONG_FIT_GENRE_MAX.
+ */
+export function isStrongReferenceFit(
   sonic: number,
   genreCloseness: number,
 ): boolean {
   return (
-    clamp01(sonic) <= MAX_SONIC_DISTANCE &&
-    clamp01(genreCloseness) <= MAX_GENRE_CLOSENESS
+    clamp01(sonic) <= STRONG_FIT_SONIC_MAX &&
+    clamp01(genreCloseness) <= STRONG_FIT_GENRE_MAX
   );
 }
 
@@ -386,9 +396,10 @@ export interface RankedReference<T> extends RankedMatch<T> {
  * Presets change which sonic axes matter. Genre closeness is applied
  * after that, including for "Match tone", so a tone twin in a looser
  * genre still sorts behind a nearer style.
- * This does not drop weak hits — the search applies passesReferenceFit
- * so a loudness preset can reorder an already-accepted shortlist
- * without emptying it.
+ * Never drops a hit and never reaches outside the candidate pool — callers
+ * pass in an already genre-gated pool and take `.slice(0, limit)` off the
+ * front of this sorted list. isStrongReferenceFit only labels how good the
+ * result is; it does not filter.
  */
 export function rankReferences<T>(
   query: StoredFingerprint,

@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { MAX_GENRE_CLOSENESS } from "@/lib/matching";
+import { STRONG_FIT_GENRE_MAX } from "@/lib/matching";
 import {
   closerQueryKind,
   combineGenreCloseness,
   deezerGenreId,
   genreLabelAffinity,
+  hydrationOrder,
+  isBareStyleTitle,
+  isDrumAndBassTempo,
+  isInGenreNeighborhood,
   searchQueriesForDiscovery,
 } from "@/lib/genres";
 
@@ -40,7 +44,7 @@ describe("genre closeness", () => {
     assert.ok(styleHit < parentHit);
     assert.ok(parentHit < relatedHit);
     // A genuinely similar genre can still clear the bar when the tone does.
-    assert.ok(relatedHit <= MAX_GENRE_CLOSENESS);
+    assert.ok(relatedHit <= STRONG_FIT_GENRE_MAX);
     assert.equal(closerQueryKind("genre", "style"), "style");
   });
 
@@ -55,5 +59,51 @@ describe("genre closeness", () => {
       genreLabelAffinity("Electronic", "Classical", "Electronic---Deep House"),
     );
     assert.ok(far > 0.3);
+  });
+
+  it("drops songs that are just the style word", () => {
+    assert.equal(isBareStyleTitle("Glitch", "Glitch"), true);
+    assert.equal(isBareStyleTitle("Glitch (Original Mix)", "glitch"), true);
+    assert.equal(isBareStyleTitle("Glitch King", "Glitch"), false);
+  });
+
+  it("hydrates the requested style before the broad parent-genre chart", () => {
+    // Style is the retrieval key; the parent chart is breadth filler.
+    assert.equal(hydrationOrder("style") < hydrationOrder("genre"), true);
+    assert.equal(
+      hydrationOrder("style-instrument") < hydrationOrder("related"),
+      true,
+    );
+  });
+
+  it("treats half-time 86 as drum and bass tempo", () => {
+    assert.equal(isDrumAndBassTempo(86.5), true);
+    assert.equal(isDrumAndBassTempo(174), true);
+    assert.equal(isDrumAndBassTempo(120), false);
+  });
+
+  it("recognizes a style phrase across & / and / n / apostrophe spellings", () => {
+    // iTunes labels this genre "Jungle/Drum'n'bass" (no spaces around "n");
+    // Deezer/Discogs spell it "Drum & Bass" or "Drum n Bass". All four must
+    // read as the same style, or the catalog looks emptier than it is and
+    // a real style match can't outrank the generic Electronic filler.
+    const label = "Electronic---Drum n Bass";
+    for (const platformGenre of [
+      "Jungle/Drum'n'bass",
+      "Drum & Bass",
+      "Drum and Bass",
+      "Drum n Bass",
+    ]) {
+      assert.equal(
+        genreLabelAffinity("Electronic", platformGenre, label),
+        0,
+        `expected "${platformGenre}" to read as an exact style match`,
+      );
+    }
+    // A short single-word alias must still not match inside an unrelated word.
+    assert.equal(
+      isInGenreNeighborhood("Pop", "Popular Science Podcast", null),
+      false,
+    );
   });
 });
